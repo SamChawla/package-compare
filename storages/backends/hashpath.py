@@ -1,20 +1,9 @@
-import errno
-import hashlib
-import os
-import warnings
+import os, hashlib, errno
 
-from django.core.files.storage import FileSystemStorage
-from django.utils.deconstruct import deconstructible
 from django.utils.encoding import force_text, force_bytes
-
-warnings.warn(
-    'HashPathStorage is unmaintaiined and will be removed in the next version of django-storages.'
-    'See https://github.com/jschneier/django-storages/issues/202',
-    PendingDeprecationWarning
-)
+from storages.compat import FileSystemStorage
 
 
-@deconstructible
 class HashPathStorage(FileSystemStorage):
     """
     Creates a hash from the uploaded file to build the path.

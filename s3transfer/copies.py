@@ -19,6 +19,7 @@ from s3transfer.tasks import CreateMultipartUploadTask
 from s3transfer.tasks import CompleteMultipartUploadTask
 from s3transfer.utils import get_callbacks
 from s3transfer.utils import calculate_range_parameter
+from s3transfer.utils import get_filtered_dict
 from s3transfer.utils import ChunksizeAdjuster
 
 
@@ -33,7 +34,8 @@ class CopySubmissionTask(SubmissionTask):
         'CopySourceSSECustomerKey': 'SSECustomerKey',
         'CopySourceSSECustomerAlgorithm': 'SSECustomerAlgorithm',
         'CopySourceSSECustomerKeyMD5': 'SSECustomerKeyMD5',
-        'RequestPayer': 'RequestPayer'
+        'RequestPayer': 'RequestPayer',
+        'ExpectedBucketOwner': 'ExpectedBucketOwner'
     }
 
     UPLOAD_PART_COPY_ARGS = [
@@ -48,6 +50,7 @@ class CopySubmissionTask(SubmissionTask):
         'SSECustomerAlgorithm',
         'SSECustomerKeyMD5',
         'RequestPayer',
+        'ExpectedBucketOwner'
     ]
 
     CREATE_MULTIPART_ARGS_BLACKLIST = [
@@ -58,7 +61,13 @@ class CopySubmissionTask(SubmissionTask):
         'CopySourceSSECustomerKey',
         'CopySourceSSECustomerAlgorithm',
         'CopySourceSSECustomerKeyMD5',
-        'MetadataDirective'
+        'MetadataDirective',
+        'TaggingDirective',
+    ]
+
+    COMPLETE_MULTIPART_ARGS = [
+        'RequestPayer',
+        'ExpectedBucketOwner'
     ]
 
     def _submit(self, client, config, osutil, request_executor,
@@ -212,6 +221,8 @@ class CopySubmissionTask(SubmissionTask):
                 )
             )
 
+        complete_multipart_extra_args = self._extra_complete_multipart_args(
+            call_args.extra_args)
         # Submit the request to complete the multipart upload.
         self._transfer_coordinator.submit(
             request_executor,
@@ -220,7 +231,8 @@ class CopySubmissionTask(SubmissionTask):
                 main_kwargs={
                     'client': client,
                     'bucket': call_args.bucket,
-                    'key': call_args.key
+                    'key': call_args.key,
+                    'extra_args': complete_multipart_extra_args,
                 },
                 pending_main_kwargs={
                     'upload_id': create_multipart_future,
@@ -244,11 +256,10 @@ class CopySubmissionTask(SubmissionTask):
     def _extra_upload_part_args(self, extra_args):
         # Only the args in COPY_PART_ARGS actually need to be passed
         # onto the upload_part_copy calls.
-        upload_parts_args = {}
-        for key, value in extra_args.items():
-            if key in self.UPLOAD_PART_COPY_ARGS:
-                upload_parts_args[key] = value
-        return upload_parts_args
+        return get_filtered_dict(extra_args, self.UPLOAD_PART_COPY_ARGS)
+
+    def _extra_complete_multipart_args(self, extra_args):
+        return get_filtered_dict(extra_args, self.COMPLETE_MULTIPART_ARGS)
 
     def _get_transfer_size(self, part_size, part_index, num_parts,
                            total_transfer_size):

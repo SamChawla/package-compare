@@ -30,6 +30,10 @@ logger = get_logger(__name__)
 
 _current_loop = None
 
+W_UNKNOWN_EVENT = """\
+Received unknown event %r for fd %r, please contact support!\
+"""
+
 
 class Stop(BaseException):
     """Stops the event loop."""
@@ -146,12 +150,18 @@ class Hub(object):
                     logger.error('Error in timer: %r', exc, exc_info=1)
         return min(delay or min_delay, max_delay)
 
+    def _remove_from_loop(self, fd):
+        try:
+            self._unregister(fd)
+        finally:
+            self._discard(fd)
+
     def add(self, fd, callback, flags, args=(), consolidate=False):
         fd = fileno(fd)
         try:
             self.poller.register(fd, flags)
         except ValueError:
-            self._discard(fd)
+            self._remove_from_loop(fd)
             raise
         else:
             dest = self.readers if flags & READ else self.writers
@@ -163,8 +173,7 @@ class Hub(object):
 
     def remove(self, fd):
         fd = fileno(fd)
-        self._unregister(fd)
-        self._discard(fd)
+        self._remove_from_loop(fd)
 
     def run_forever(self):
         self._running = True
@@ -207,8 +216,7 @@ class Hub(object):
         writable = fd in self.writers
         on_write = self.writers.get(fd)
         try:
-            self._unregister(fd)
-            self._discard(fd)
+            self._remove_from_loop(fd)
         finally:
             if writable:
                 cb, args = on_write
@@ -218,8 +226,7 @@ class Hub(object):
         readable = fd in self.readers
         on_read = self.readers.get(fd)
         try:
-            self._unregister(fd)
-            self._discard(fd)
+            self._remove_from_loop(fd)
         finally:
             if readable:
                 cb, args = on_read
@@ -280,6 +287,7 @@ class Hub(object):
                     raise StopIteration()
 
                 for fd, event in events or ():
+                    general_error = False
                     if fd in consolidate and \
                             writers.get(fd) is None:
                         to_consolidate.append(fd)
@@ -299,6 +307,12 @@ class Hub(object):
                             self.remove_writer(fd)
                             continue
                     elif event & ERR:
+                        general_error = True
+                    else:
+                        logger.info(W_UNKNOWN_EVENT, event, fd)
+                        general_error = True
+
+                    if general_error:
                         try:
                             cb, cbargs = (readers.get(fd) or
                                           writers.get(fd))
@@ -306,7 +320,9 @@ class Hub(object):
                             pass
 
                     if cb is None:
+                        self.remove(fd)
                         continue
+
                     if isinstance(cb, generator):
                         try:
                             next(cb)

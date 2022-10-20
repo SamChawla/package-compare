@@ -1,9 +1,10 @@
 import math
 import json
+import weakref
 
 from jmespath import exceptions
 from jmespath.compat import string_type as STRING_TYPE
-from jmespath.compat import get_methods, with_metaclass
+from jmespath.compat import get_methods
 
 
 # python types -> jmespath types
@@ -34,39 +35,48 @@ REVERSE_TYPES_MAP = {
 }
 
 
-def signature(*arguments):
-    def _record_signature(func):
+def populate_function_table(cls):
+    func_table = cls.FUNCTION_TABLE
+    for name, method in get_methods(cls):
+        signature = getattr(method, 'signature', None)
+        if signature is not None:
+            func_table[name[6:]] = {"function": method,
+                                    "signature": signature}
+    return cls
+
+
+def builtin_function(*arguments):
+    def _record_arity(func):
         func.signature = arguments
         return func
-    return _record_signature
+    return _record_arity
 
 
-class FunctionRegistry(type):
-    def __init__(cls, name, bases, attrs):
-        cls._populate_function_table()
-        super(FunctionRegistry, cls).__init__(name, bases, attrs)
-
-    def _populate_function_table(cls):
-        function_table = getattr(cls, 'FUNCTION_TABLE', {})
-        # Any method with a @signature decorator that also
-        # starts with "_func_" is registered as a function.
-        # _func_max_by -> max_by function.
-        for name, method in get_methods(cls):
-            if not name.startswith('_func_'):
-                continue
-            signature = getattr(method, 'signature', None)
-            if signature is not None:
-                function_table[name[6:]] = {
-                    'function': method,
-                    'signature': signature,
-                }
-        cls.FUNCTION_TABLE = function_table
-
-
-class Functions(with_metaclass(FunctionRegistry, object)):
+@populate_function_table
+class RuntimeFunctions(object):
+    # The built in functions are automatically populated in the FUNCTION_TABLE
+    # using the @builtin_function decorator on methods defined in this class.
 
     FUNCTION_TABLE = {
     }
+
+    def __init__(self):
+        self._interpreter = None
+
+    @property
+    def interpreter(self):
+        if self._interpreter is None:
+            return None
+        else:
+            return self._interpreter()
+
+    @interpreter.setter
+    def interpreter(self, value):
+        # A weakref is used because we have
+        # a cyclic reference and we want to allow
+        # for the memory to be properly freed when
+        # the objects are no longer needed.
+        self._interpreter = weakref.ref(value)
 
     def call_function(self, function_name, resolved_args):
         try:
@@ -160,31 +170,28 @@ class Functions(with_metaclass(FunctionRegistry, object)):
                     raise exceptions.JMESPathTypeError(
                         function_name, element, actual_typename, types)
 
-    @signature({'types': ['number']})
+    @builtin_function({'types': ['number']})
     def _func_abs(self, arg):
         return abs(arg)
 
-    @signature({'types': ['array-number']})
+    @builtin_function({'types': ['array-number']})
     def _func_avg(self, arg):
-        if arg:
-            return sum(arg) / float(len(arg))
-        else:
-            return None
+        return sum(arg) / float(len(arg))
 
-    @signature({'types': [], 'variadic': True})
+    @builtin_function({'types': [], 'variadic': True})
     def _func_not_null(self, *arguments):
         for argument in arguments:
             if argument is not None:
                 return argument
 
-    @signature({'types': []})
+    @builtin_function({'types': []})
     def _func_to_array(self, arg):
         if isinstance(arg, list):
             return arg
         else:
             return [arg]
 
-    @signature({'types': []})
+    @builtin_function({'types': []})
     def _func_to_string(self, arg):
         if isinstance(arg, STRING_TYPE):
             return arg
@@ -192,7 +199,7 @@ class Functions(with_metaclass(FunctionRegistry, object)):
             return json.dumps(arg, separators=(',', ':'),
                               default=str)
 
-    @signature({'types': []})
+    @builtin_function({'types': []})
     def _func_to_number(self, arg):
         if isinstance(arg, (list, dict, bool)):
             return None
@@ -209,88 +216,88 @@ class Functions(with_metaclass(FunctionRegistry, object)):
             except ValueError:
                 return None
 
-    @signature({'types': ['array', 'string']}, {'types': []})
+    @builtin_function({'types': ['array', 'string']}, {'types': []})
     def _func_contains(self, subject, search):
         return search in subject
 
-    @signature({'types': ['string', 'array', 'object']})
+    @builtin_function({'types': ['string', 'array', 'object']})
     def _func_length(self, arg):
         return len(arg)
 
-    @signature({'types': ['string']}, {'types': ['string']})
+    @builtin_function({'types': ['string']}, {'types': ['string']})
     def _func_ends_with(self, search, suffix):
         return search.endswith(suffix)
 
-    @signature({'types': ['string']}, {'types': ['string']})
+    @builtin_function({'types': ['string']}, {'types': ['string']})
     def _func_starts_with(self, search, suffix):
         return search.startswith(suffix)
 
-    @signature({'types': ['array', 'string']})
+    @builtin_function({'types': ['array', 'string']})
     def _func_reverse(self, arg):
         if isinstance(arg, STRING_TYPE):
             return arg[::-1]
         else:
             return list(reversed(arg))
 
-    @signature({"types": ['number']})
+    @builtin_function({"types": ['number']})
     def _func_ceil(self, arg):
         return math.ceil(arg)
 
-    @signature({"types": ['number']})
+    @builtin_function({"types": ['number']})
     def _func_floor(self, arg):
         return math.floor(arg)
 
-    @signature({"types": ['string']}, {"types": ['array-string']})
+    @builtin_function({"types": ['string']}, {"types": ['array-string']})
     def _func_join(self, separator, array):
         return separator.join(array)
 
-    @signature({'types': ['expref']}, {'types': ['array']})
+    @builtin_function({'types': ['expref']}, {'types': ['array']})
     def _func_map(self, expref, arg):
         result = []
         for element in arg:
-            result.append(expref.visit(expref.expression, element))
+            result.append(self.interpreter.visit(expref.expression, element))
         return result
 
-    @signature({"types": ['array-number', 'array-string']})
+    @builtin_function({"types": ['array-number', 'array-string']})
     def _func_max(self, arg):
         if arg:
             return max(arg)
         else:
             return None
 
-    @signature({"types": ["object"], "variadic": True})
+    @builtin_function({"types": ["object"], "variadic": True})
     def _func_merge(self, *arguments):
         merged = {}
         for arg in arguments:
             merged.update(arg)
         return merged
 
-    @signature({"types": ['array-number', 'array-string']})
+    @builtin_function({"types": ['array-number', 'array-string']})
     def _func_min(self, arg):
         if arg:
             return min(arg)
         else:
             return None
 
-    @signature({"types": ['array-string', 'array-number']})
+    @builtin_function({"types": ['array-string', 'array-number']})
     def _func_sort(self, arg):
         return list(sorted(arg))
 
-    @signature({"types": ['array-number']})
+    @builtin_function({"types": ['array-number']})
     def _func_sum(self, arg):
         return sum(arg)
 
-    @signature({"types": ['object']})
+    @builtin_function({"types": ['object']})
     def _func_keys(self, arg):
         # To be consistent with .values()
         # should we also return the indices of a list?
         return list(arg.keys())
 
-    @signature({"types": ['object']})
+    @builtin_function({"types": ['object']})
     def _func_values(self, arg):
         return list(arg.values())
 
-    @signature({'types': []})
+    @builtin_function({'types': []})
     def _func_type(self, arg):
         if isinstance(arg, STRING_TYPE):
             return "string"
@@ -305,7 +312,7 @@ class Functions(with_metaclass(FunctionRegistry, object)):
         elif arg is None:
             return "null"
 
-    @signature({'types': ['array']}, {'types': ['expref']})
+    @builtin_function({'types': ['array']}, {'types': ['expref']})
     def _func_sort_by(self, array, expref):
         if not array:
             return array
@@ -316,32 +323,34 @@ class Functions(with_metaclass(FunctionRegistry, object)):
         # that validates that type, which requires that remaining array
         # elements resolve to the same type as the first element.
         required_type = self._convert_to_jmespath_type(
-            type(expref.visit(expref.expression, array[0])).__name__)
+            type(self.interpreter.visit(expref.expression, array[0])).__name__)
         if required_type not in ['number', 'string']:
             raise exceptions.JMESPathTypeError(
                 'sort_by', array[0], required_type, ['string', 'number'])
-        keyfunc = self._create_key_func(expref,
+        keyfunc = self._create_key_func(expref.expression,
                                         [required_type],
                                         'sort_by')
         return list(sorted(array, key=keyfunc))
 
-    @signature({'types': ['array']}, {'types': ['expref']})
+    @builtin_function({'types': ['array']}, {'types': ['expref']})
     def _func_min_by(self, array, expref):
-        keyfunc = self._create_key_func(expref,
+        keyfunc = self._create_key_func(expref.expression,
                                         ['number', 'string'],
                                         'min_by')
         return min(array, key=keyfunc)
 
-    @signature({'types': ['array']}, {'types': ['expref']})
+    @builtin_function({'types': ['array']}, {'types': ['expref']})
     def _func_max_by(self, array, expref):
-        keyfunc = self._create_key_func(expref,
+        keyfunc = self._create_key_func(expref.expression,
                                         ['number', 'string'],
                                         'min_by')
         return max(array, key=keyfunc)
 
-    def _create_key_func(self, expref, allowed_types, function_name):
+    def _create_key_func(self, expr_node, allowed_types, function_name):
+        interpreter = self.interpreter
+
         def keyfunc(x):
-            result = expref.visit(expref.expression, x)
+            result = interpreter.visit(expr_node, x)
             actual_typename = type(result).__name__
             jmespath_type = self._convert_to_jmespath_type(actual_typename)
             # allowed_types is in term of jmespath types, not python types.

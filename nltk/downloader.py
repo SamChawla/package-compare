@@ -1,6 +1,6 @@
 # Natural Language Toolkit: Corpus & Model Downloader
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
@@ -159,7 +159,7 @@ they didn't download that model.
 default: unzip or not?
 
 """
-import time, os, zipfile, sys, textwrap, threading, itertools, shutil
+import time, os, zipfile, sys, textwrap, threading, itertools
 from hashlib import md5
 
 try:
@@ -756,7 +756,7 @@ class Downloader(object):
         else:
             filepath = os.path.join(download_dir, info.filename)
             if download_dir != self._download_dir:
-                return self._pkg_status(info, filepath)
+                status = self._pkg_status(info, filepath)
             else:
                 if info.id not in self._status_cache:
                     self._status_cache[info.id] = self._pkg_status(info,
@@ -2030,12 +2030,13 @@ def _unzip_iter(filename, root, verbose=True):
     for i, filename in enumerate(filelist):
         filepath = os.path.join(root, *filename.split('/'))
 
-        try:
-            with open(filepath, 'wb') as dstfile, zf.open(filename) as srcfile:
-                shutil.copyfileobj(srcfile, dstfile)
-        except Exception as e:
-            yield ErrorMessage(filename, e)
-            return
+        with open(filepath, 'wb') as outfile:
+            try:
+                contents = zf.read(filename)
+            except Exception as e:
+                yield ErrorMessage(filename, e)
+                return
+            outfile.write(contents)
 
         if verbose and (i*10/len(filelist) > (i-1)*10/len(filelist)):
             sys.stdout.write('.')

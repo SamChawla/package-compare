@@ -25,7 +25,7 @@ from raven.conf import setup_logging
 from raven.base import Client
 from raven.middleware import Sentry as SentryMiddleware
 from raven.handlers.logging import SentryHandler
-from raven.utils.compat import urlparse
+from raven.utils.compat import _urlparse
 from raven.utils.encoding import to_unicode
 from raven.utils.wsgi import get_headers, get_environ
 from raven.utils.conf import convert_options
@@ -99,7 +99,7 @@ class Sentry(object):
                  logging=False, logging_exclusions=None, level=logging.NOTSET,
                  wrap_wsgi=None, register_signal=True):
         if client and not isinstance(client, Client):
-            raise TypeError('client should be an instance of Client')
+            raise TypeError('client should an instance of Client')
 
         self.dsn = dsn
         self.logging = logging
@@ -198,7 +198,7 @@ class Sentry(object):
         if retriever is None:
             retriever = self.get_form_data
 
-        urlparts = urlparse.urlsplit(request.url)
+        urlparts = _urlparse.urlsplit(request.url)
 
         try:
             data = retriever(request)

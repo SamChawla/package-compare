@@ -1,6 +1,6 @@
 # Natural Language Toolkit: Table widget
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
@@ -808,7 +808,7 @@ class Table(object):
         """
         Delete the ``row_index``th row from this table.
         """
-        if isinstance(row_index, slice):
+        if isinstance(index, slice):
             raise ValueError('Slicing not supported')
         if isinstance(row_index, tuple) and len(row_index)==2:
             raise ValueError('Cannot delete a single cell!')

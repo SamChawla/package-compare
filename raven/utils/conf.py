@@ -3,7 +3,7 @@ from __future__ import absolute_import
 import copy
 import os
 
-from raven.utils.compat import string_types
+from raven._compat import string_types
 from raven.utils.imports import import_string
 
 
@@ -50,7 +50,6 @@ def convert_options(settings, defaults=None):
     options.setdefault('context', getopt('context'))
     options.setdefault('tags', getopt('tags'))
     options.setdefault('release', getopt('release'))
-    options.setdefault('repos', getopt('repos'))
     options.setdefault('environment', getopt('environment'))
     options.setdefault('ignore_exceptions', getopt('ignore_exceptions'))
 

@@ -197,8 +197,7 @@ class PerceptronTagger(TaggerI):
         # Pickle as a binary file
         if save_loc is not None:
             with open(save_loc, 'wb') as fout:
-                # changed protocol from -1 to 2 to make pickling Python 2 compatible
-                pickle.dump((self.model.weights, self.tagdict, self.classes), fout, 2)
+                pickle.dump((self.model.weights, self.tagdict, self.classes), fout, -1)
         
 
     def load(self, loc):

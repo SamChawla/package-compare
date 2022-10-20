@@ -14,7 +14,7 @@ import logging
 import sys
 import traceback
 
-from raven.utils.compat import string_types, iteritems, text_type
+from raven._compat import string_types, iteritems, text_type
 from raven.base import Client
 from raven.utils.encoding import to_string
 from raven.utils.stacks import iter_stack_frames
@@ -24,29 +24,6 @@ RESERVED = frozenset((
     'exc_text', 'exc_info', 'data', 'created', 'levelname', 'msecs',
     'relativeCreated', 'tags', 'message',
 ))
-
-
-def extract_extra(record, reserved=RESERVED):
-    data = {}
-
-    extra = getattr(record, 'data', None)
-    if not isinstance(extra, dict):
-        if extra:
-            extra = {'data': extra}
-        else:
-            extra = {}
-
-    for k, v in iteritems(vars(record)):
-        if k in reserved:
-            continue
-        if k.startswith('_'):
-            continue
-        if '.' not in k and k not in ('culprit', 'server_name', 'fingerprint'):
-            extra[k] = v
-        else:
-            data[k] = v
-
-    return data, extra
 
 
 class SentryHandler(logging.Handler, object):
@@ -127,7 +104,24 @@ class SentryHandler(logging.Handler, object):
         return frames
 
     def _emit(self, record, **kwargs):
-        data, extra = extract_extra(record)
+        data = {}
+
+        extra = getattr(record, 'data', None)
+        if not isinstance(extra, dict):
+            if extra:
+                extra = {'data': extra}
+            else:
+                extra = {}
+
+        for k, v in iteritems(vars(record)):
+            if k in RESERVED:
+                continue
+            if k.startswith('_'):
+                continue
+            if '.' not in k and k not in ('culprit', 'server_name', 'fingerprint'):
+                extra[k] = v
+            else:
+                data[k] = v
 
         stack = getattr(record, 'stack', None)
         if stack is True:
@@ -168,10 +162,10 @@ class SentryHandler(logging.Handler, object):
         data['level'] = record.levelno
         data['logger'] = record.name
 
-        kwargs['tags'] = tags = {}
-        if self.tags:
-            tags.update(self.tags)
-        tags.update(getattr(record, 'tags', {}))
+        if hasattr(record, 'tags'):
+            kwargs['tags'] = record.tags
+        elif self.tags:
+            kwargs['tags'] = self.tags
 
         kwargs.update(handler_kwargs)
 

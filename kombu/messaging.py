@@ -114,7 +114,7 @@ class Producer(object):
                 mandatory=False, immediate=False, priority=0,
                 content_type=None, content_encoding=None, serializer=None,
                 headers=None, compression=None, exchange=None, retry=False,
-                retry_policy=None, declare=[], **properties):
+                retry_policy=None, declare=[], expiration=None, **properties):
         """Publish message to the specified exchange.
 
         :param body: Message body.
@@ -138,6 +138,8 @@ class Producer(object):
             connection is lost.
         :keyword retry_policy: Retry configuration, this is the keywords
             supported by :meth:`~kombu.Connection.ensure`.
+        :keyword expiration: A TTL in seconds can be specified per message.
+            Default is no expiration.
         :keyword \*\*properties: Additional message properties, see AMQP spec.
 
         """
@@ -155,6 +157,8 @@ class Producer(object):
         if not isinstance(delivery_mode, numbers.Integral):
             delivery_mode = DELIVERY_MODES[delivery_mode]
         properties['delivery_mode'] = delivery_mode
+        if expiration is not None:
+            properties['expiration'] = str(int(expiration*1000))
 
         body, content_type, content_encoding = self._prepare(
             body, serializer, content_type, content_encoding,
@@ -341,13 +345,14 @@ class Consumer(object):
 
     def __init__(self, channel, queues=None, no_ack=None, auto_declare=None,
                  callbacks=None, on_decode_error=None, on_message=None,
-                 accept=None):
+                 accept=None, tag_prefix=None):
         self.channel = channel
         self.queues = self.queues or [] if queues is None else queues
         self.no_ack = self.no_ack if no_ack is None else no_ack
         self.callbacks = (self.callbacks or [] if callbacks is None
                           else callbacks)
         self.on_message = on_message
+        self.tag_prefix = tag_prefix
         self._active_tags = {}
         if auto_declare is not None:
             self.auto_declare = auto_declare
@@ -568,7 +573,8 @@ class Consumer(object):
         return tag
 
     def _add_tag(self, queue, consumer_tag=None):
-        tag = consumer_tag or str(next(self._tags))
+        tag = consumer_tag or '{0}{1}'.format(
+            self.tag_prefix, next(self._tags))
         self._active_tags[queue.name] = tag
         return tag
 

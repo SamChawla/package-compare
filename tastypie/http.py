@@ -22,10 +22,6 @@ class HttpAccepted(HttpResponse):
 class HttpNoContent(HttpResponse):
     status_code = 204
 
-    def __init__(self, *args, **kwargs):
-        super(HttpNoContent, self).__init__(*args, **kwargs)
-        del self['Content-Type']
-
 
 class HttpMultipleChoices(HttpResponse):
     status_code = 300
@@ -81,3 +77,4 @@ class HttpApplicationError(HttpResponse):
 
 class HttpNotImplemented(HttpResponse):
     status_code = 501
+

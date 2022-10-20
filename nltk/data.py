@@ -1,6 +1,6 @@
 # Natural Language Toolkit: Utility functions
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: Edward Loper <edloper@gmail.com>
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
@@ -369,6 +369,11 @@ class BufferedGzipFile(GzipFile):
         """
         GzipFile.__init__(self, filename, mode, compresslevel, fileobj)
         self._size = kwargs.get('size', self.SIZE)
+        # Note: In > Python3.5, GzipFile is already using a 
+        # buffered reader in the backend which has a variable self._buffer
+        # See https://github.com/nltk/nltk/issues/1308
+        if sys.version.startswith('3.5'):
+            sys.stderr.write("Use the native Python gzip.GzipFile instead.")
         self._nltk_buffer = BytesIO()
         # cStringIO does not support len.
         self._len = 0
@@ -440,13 +445,7 @@ class GzipFileSystemPathPointer(FileSystemPathPointer):
     """
 
     def open(self, encoding=None):
-        # Note: In >= Python3.5, GzipFile is already using a
-        # buffered reader in the backend which has a variable self._buffer
-        # See https://github.com/nltk/nltk/issues/1308
-        if sys.version.startswith('2.7') or sys.version.startswith('3.4'):
-            stream = BufferedGzipFile(self._path, 'rb')
-        else:
-            stream = GzipFile(self._path, 'rb')
+        stream = BufferedGzipFile(self._path, 'rb')
         if encoding:
             stream = SeekableUnicodeStreamReader(stream, encoding)
         return stream
@@ -511,13 +510,7 @@ class ZipFilePathPointer(PathPointer):
         data = self._zipfile.read(self._entry)
         stream = BytesIO(data)
         if self._entry.endswith('.gz'):
-            # Note: In >= Python3.5, GzipFile is already using a
-            # buffered reader in the backend which has a variable self._buffer
-            # See https://github.com/nltk/nltk/issues/1308
-            if sys.version.startswith('2.7') or sys.version.startswith('3.4'):
-                stream = BufferedGzipFile(self._entry, fileobj=stream)
-            else:
-                stream = GzipFile(self._entry, fileobj=stream)
+            stream = BufferedGzipFile(self._entry, fileobj=stream)
         elif encoding is not None:
             stream = SeekableUnicodeStreamReader(stream, encoding)
         return stream

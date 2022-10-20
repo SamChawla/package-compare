@@ -1,6 +1,6 @@
 # Natural Language Toolkit: Combinatory Categorial Grammar
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: Graeme Gange <ggange@csse.unimelb.edu.au>
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
@@ -335,7 +335,7 @@ def printCCGTree(lwidth,tree):
 
     (token, op) = tree.label()
 
-    if op == 'Leaf':
+    if op == u'Leaf':
         return rwidth
 
     # Pad to the left with spaces, followed by a sequence of '-'

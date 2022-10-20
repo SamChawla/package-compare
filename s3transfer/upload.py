@@ -21,6 +21,7 @@ from s3transfer.tasks import SubmissionTask
 from s3transfer.tasks import CreateMultipartUploadTask
 from s3transfer.tasks import CompleteMultipartUploadTask
 from s3transfer.utils import get_callbacks
+from s3transfer.utils import get_filtered_dict
 from s3transfer.utils import DeferredOpenFile, ChunksizeAdjuster
 
 
@@ -60,7 +61,7 @@ class AggregatedProgressCallback(object):
 class InterruptReader(object):
     """Wrapper that can interrupt reading using an error
 
-    It uses a transfer coordinator to propogate an error if it notices
+    It uses a transfer coordinator to propagate an error if it notices
     that a read is being made while the file is being read from.
 
     :type fileobj: file-like obj
@@ -84,8 +85,8 @@ class InterruptReader(object):
             raise self._transfer_coordinator.exception
         return self._fileobj.read(amount)
 
-    def seek(self, where):
-        self._fileobj.seek(where)
+    def seek(self, where, whence=0):
+        self._fileobj.seek(where, whence)
 
     def tell(self):
         return self._fileobj.tell()
@@ -115,9 +116,10 @@ class UploadInputManager(object):
     that may be accepted. All implementations must subclass and override
     public methods from this class.
     """
-    def __init__(self, osutil, transfer_coordinator):
+    def __init__(self, osutil, transfer_coordinator, bandwidth_limiter=None):
         self._osutil = osutil
         self._transfer_coordinator = transfer_coordinator
+        self._bandwidth_limiter = bandwidth_limiter
 
     @classmethod
     def is_compatible(cls, upload_source):
@@ -200,8 +202,12 @@ class UploadInputManager(object):
         """
         raise NotImplementedError('must implement yield_upload_part_bodies()')
 
-    def _wrap_with_interrupt_reader(self, fileobj):
-        return InterruptReader(fileobj, self._transfer_coordinator)
+    def _wrap_fileobj(self, fileobj):
+        fileobj = InterruptReader(fileobj, self._transfer_coordinator)
+        if self._bandwidth_limiter:
+            fileobj = self._bandwidth_limiter.get_bandwith_limited_stream(
+                fileobj, self._transfer_coordinator, enabled=False)
+        return fileobj
 
     def _get_progress_callbacks(self, transfer_future):
         callbacks = get_callbacks(transfer_future, 'progress')
@@ -241,7 +247,7 @@ class UploadFilenameInputManager(UploadInputManager):
         # Wrap fileobj with interrupt reader that will quickly cancel
         # uploads if needed instead of having to wait for the socket
         # to completely read all of the data.
-        fileobj = self._wrap_with_interrupt_reader(fileobj)
+        fileobj = self._wrap_fileobj(fileobj)
 
         callbacks = self._get_progress_callbacks(transfer_future)
         close_callbacks = self._get_close_callbacks(callbacks)
@@ -268,7 +274,7 @@ class UploadFilenameInputManager(UploadInputManager):
             # Wrap fileobj with interrupt reader that will quickly cancel
             # uploads if needed instead of having to wait for the socket
             # to completely read all of the data.
-            fileobj = self._wrap_with_interrupt_reader(fileobj)
+            fileobj = self._wrap_fileobj(fileobj)
 
             # Wrap the file-like object into a ReadFileChunk to get progress.
             read_file_chunk = self._osutil.open_file_chunk_reader_from_fileobj(
@@ -327,10 +333,10 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
         # since there is not really a mechanism in python (i.e. os.dup
         # points to the same OS filehandle which causes concurrency
         # issues). So instead we need to read from the fileobj and
-        # chunk the data out to seperate file-like objects in memory.
+        # chunk the data out to separate file-like objects in memory.
         data = fileobj.read(kwargs['part_size'])
         # We return the length of the data instead of the full_file_size
-        # because we partitioned the data into seperate BytesIO objects
+        # because we partitioned the data into separate BytesIO objects
         # meaning the BytesIO object has no knowledge of its start position
         # relative the input source nor access to the rest of the input
         # source. So we must treat it as its own standalone file.
@@ -346,9 +352,9 @@ class UploadSeekableInputManager(UploadFilenameInputManager):
 
 class UploadNonSeekableInputManager(UploadInputManager):
     """Upload utility for a file-like object that cannot seek."""
-    def __init__(self, osutil, transfer_coordinator):
+    def __init__(self, osutil, transfer_coordinator, bandwidth_limiter=None):
         super(UploadNonSeekableInputManager, self).__init__(
-            osutil, transfer_coordinator)
+            osutil, transfer_coordinator, bandwidth_limiter)
         self._initial_data = b''
 
     @classmethod
@@ -433,7 +439,7 @@ class UploadNonSeekableInputManager(UploadInputManager):
         if len(self._initial_data) == 0:
             return fileobj.read(amount)
 
-        # If the requested number of bytes is less thant the amount of
+        # If the requested number of bytes is less than the amount of
         # initial data, pull entirely from initial data.
         if amount <= len(self._initial_data):
             data = self._initial_data[:amount]
@@ -470,7 +476,7 @@ class UploadNonSeekableInputManager(UploadInputManager):
 
         :return: Fully wrapped data.
         """
-        fileobj = self._wrap_with_interrupt_reader(six.BytesIO(data))
+        fileobj = self._wrap_fileobj(six.BytesIO(data))
         return self._osutil.open_file_chunk_reader_from_fileobj(
             fileobj=fileobj, chunk_size=len(data), full_file_size=len(data),
             callbacks=callbacks, close_callbacks=close_callbacks)
@@ -484,10 +490,16 @@ class UploadSubmissionTask(SubmissionTask):
         'SSECustomerAlgorithm',
         'SSECustomerKeyMD5',
         'RequestPayer',
+        'ExpectedBucketOwner'
+    ]
+
+    COMPLETE_MULTIPART_ARGS = [
+        'RequestPayer',
+        'ExpectedBucketOwner'
     ]
 
     def _get_upload_input_manager_cls(self, transfer_future):
-        """Retieves a class for managing input for an upload based on file type
+        """Retrieves a class for managing input for an upload based on file type
 
         :type transfer_future: s3transfer.futures.TransferFuture
         :param transfer_future: The transfer future for the request
@@ -511,7 +523,7 @@ class UploadSubmissionTask(SubmissionTask):
                 fileobj, type(fileobj)))
 
     def _submit(self, client, config, osutil, request_executor,
-                transfer_future):
+                transfer_future, bandwidth_limiter=None):
         """
         :param client: The client associated with the transfer manager
 
@@ -531,7 +543,8 @@ class UploadSubmissionTask(SubmissionTask):
             transfer request that tasks are being submitted for
         """
         upload_input_manager = self._get_upload_input_manager_cls(
-            transfer_future)(osutil, self._transfer_coordinator)
+            transfer_future)(
+                osutil, self._transfer_coordinator, bandwidth_limiter)
 
         # Determine the size if it was not provided
         if transfer_future.meta.size is None:
@@ -630,6 +643,8 @@ class UploadSubmissionTask(SubmissionTask):
                 )
             )
 
+        complete_multipart_extra_args = self._extra_complete_multipart_args(
+            call_args.extra_args)
         # Submit the request to complete the multipart upload.
         self._transfer_coordinator.submit(
             request_executor,
@@ -638,7 +653,8 @@ class UploadSubmissionTask(SubmissionTask):
                 main_kwargs={
                     'client': client,
                     'bucket': call_args.bucket,
-                    'key': call_args.key
+                    'key': call_args.key,
+                    'extra_args': complete_multipart_extra_args,
                 },
                 pending_main_kwargs={
                     'upload_id': create_multipart_future,
@@ -651,11 +667,10 @@ class UploadSubmissionTask(SubmissionTask):
     def _extra_upload_part_args(self, extra_args):
         # Only the args in UPLOAD_PART_ARGS actually need to be passed
         # onto the upload_part calls.
-        upload_parts_args = {}
-        for key, value in extra_args.items():
-            if key in self.UPLOAD_PART_ARGS:
-                upload_parts_args[key] = value
-        return upload_parts_args
+        return get_filtered_dict(extra_args, self.UPLOAD_PART_ARGS)
+
+    def _extra_complete_multipart_args(self, extra_args):
+        return get_filtered_dict(extra_args, self.COMPLETE_MULTIPART_ARGS)
 
     def _get_upload_task_tag(self, upload_input_manager, operation_name):
         tag = None

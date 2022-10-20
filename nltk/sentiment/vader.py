@@ -1,11 +1,10 @@
 # coding: utf-8
 # Natural Language Toolkit: vader
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: C.J. Hutto <Clayton.Hutto@gtri.gatech.edu>
 #         Ewan Klein <ewan@inf.ed.ac.uk> (modifications)
 #         Pierpaolo Pantone <24alsecondo@gmail.com> (modifications)
-#         George Berry <geb97@cornell.edu> (modifications)
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
 #
@@ -25,7 +24,6 @@ import codecs
 import math
 import re
 import string
-from itertools import product
 import nltk.data
 
 ##Constants##
@@ -41,7 +39,7 @@ C_INCR = 0.733
 N_SCALAR = -0.74
 
 # for removing punctuation
-REGEX_REMOVE_PUNCTUATION = re.compile('[{0}]'.format(re.escape(string.punctuation)))
+REGEX_REMOVE_PUNCTUATION = re.compile('[%s]' % re.escape(string.punctuation))
 
 PUNC_LIST = [".", "!", "?", ",", ";", ":", "-", "'", "\"",
              "!!", "!!!", "??", "???", "?!?", "!?!", "?!?!", "!?!?"]
@@ -162,38 +160,37 @@ class SentiText(object):
         # adjacent punctuation (keeps emoticons & contractions)
         self.is_cap_diff = allcap_differential(self.words_and_emoticons)
 
-    def _words_plus_punc(self):
-        """
-        Returns mapping of form:
-        {
-            'cat,': 'cat',
-            ',cat': 'cat',
-        }
-        """
-        no_punc_text = REGEX_REMOVE_PUNCTUATION.sub('', self.text)
+    def _words_only(self):
+        text_mod = REGEX_REMOVE_PUNCTUATION.sub('', self.text)
         # removes punctuation (but loses emoticons & contractions)
-        words_only = no_punc_text.split()
-        # remove singletons
-        words_only = set( w for w in words_only if len(w) > 1 )
-        # the product gives ('cat', ',') and (',', 'cat')
-        punc_before = {''.join(p): p[1] for p in product(PUNC_LIST, words_only)}
-        punc_after = {''.join(p): p[0] for p in product(words_only, PUNC_LIST)}
-        words_punc_dict = punc_before
-        words_punc_dict.update(punc_after)
-        return words_punc_dict
+        words_only = text_mod.split()
+        # get rid of empty items or single letter "words" like 'a' and 'I'
+        words_only = [word for word in words_only if len(word) > 1]
+        return words_only
 
     def _words_and_emoticons(self):
-        """
-        Removes leading and trailing puncutation
-        Leaves contractions and most emoticons
-            Does not preserve punc-plus-letter emoticons (e.g. :D)
-        """
         wes = self.text.split()
-        words_punc_dict = self._words_plus_punc()
+
+        # get rid of residual empty items or single letter words
         wes = [we for we in wes if len(we) > 1]
-        for i, we in enumerate(wes):
-            if we in words_punc_dict:
-                wes[i] = words_punc_dict[we]
+
+        for word in self._words_only():
+            for punct in PUNC_LIST:
+                pword = punct + word
+                x1 = wes.count(pword)
+                while x1 > 0:
+                    i = wes.index(pword)
+                    wes.remove(pword)
+                    wes.insert(i, word)
+                    x1 = wes.count(pword)
+
+                wordp = word + punct
+                x2 = wes.count(wordp)
+                while x2 > 0:
+                    i = wes.index(wordp)
+                    wes.remove(wordp)
+                    wes.insert(i, word)
+                    x2 = wes.count(wordp)
         return wes
 
 class SentimentIntensityAnalyzer(object):

@@ -39,14 +39,12 @@ class TableResource(object):
         in batches.  In addition, the batch writer will also automatically
         handle any unprocessed items and resend them as needed.  All you need
         to do is call ``put_item`` for any items you want to add, and
-        ``delete_item`` for any items you want to delete.  In addition, you can
-        specify ``auto_dedup`` if the batch might contain duplicated requests
-        and you want this writer to handle de-dup for you.
+        ``delete_item`` for any items you want to delete.
 
         Example usage::
 
             with table.batch_writer() as batch:
-                for _ in xrange(1000000):
+                for _ in range(1000000):
                     batch.put_item(Item={'HashKey': '...',
                                          'Otherstuff': '...'})
                 # You can also delete_items in a batch.

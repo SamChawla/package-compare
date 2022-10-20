@@ -174,6 +174,13 @@ def document_model_driven_method(section, method_name, operation_model,
     # Add the description for the method.
     method_intro_section = section.add_new_section('method-intro')
     method_intro_section.include_doc_string(method_description)
+    if operation_model.deprecated:
+        method_intro_section.style.start_danger()
+        method_intro_section.writeln(
+                'This operation is deprecated and may not function as '
+                'expected. This operation should not be used going forward '
+                'and is only kept for the purpose of backwards compatiblity.')
+        method_intro_section.style.end_danger()
     service_uid = operation_model.service_model.metadata.get('uid')
     if service_uid is not None:
         method_intro_section.style.new_paragraph()
@@ -193,6 +200,7 @@ def document_model_driven_method(section, method_name, operation_model,
         'special_shape_types': {
             'streaming_input_shape': operation_model.get_streaming_input(),
             'streaming_output_shape': operation_model.get_streaming_output(),
+            'eventstream_output_shape': operation_model.get_event_stream_output(),
         },
     }
 
@@ -228,6 +236,20 @@ def document_model_driven_method(section, method_name, operation_model,
         return_section.write(':returns: ')
         return_section.style.indent()
         return_section.style.new_line()
+
+        # If the operation is an event stream, describe the tagged union
+        event_stream_output = operation_model.get_event_stream_output()
+        if event_stream_output:
+            event_section = return_section.add_new_section('event-stream')
+            event_section.style.new_paragraph()
+            event_section.write(
+                'The response of this operation contains an '
+                ':class:`.EventStream` member. When iterated the '
+                ':class:`.EventStream` will yield events based on the '
+                'structure below, where only one of the top level keys '
+                'will be present for any given event.'
+            )
+            event_section.style.new_line()
 
         # Add an example return value
         return_example_section = return_section.add_new_section('example')

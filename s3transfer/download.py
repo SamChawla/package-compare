@@ -11,25 +11,19 @@
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
 import logging
-import os
-import socket
-import math
 import threading
 import heapq
 
 
 from botocore.compat import six
-from botocore.exceptions import IncompleteReadError
-from botocore.vendored.requests.packages.urllib3.exceptions import \
-    ReadTimeoutError
 
-from s3transfer.compat import SOCKET_ERROR
 from s3transfer.compat import seekable
 from s3transfer.exceptions import RetriesExceededError
 from s3transfer.futures import IN_MEMORY_DOWNLOAD_TAG
-from s3transfer.utils import random_file_extension
+from s3transfer.utils import S3_RETRYABLE_DOWNLOAD_ERRORS
 from s3transfer.utils import get_callbacks
 from s3transfer.utils import invoke_progress_callbacks
+from s3transfer.utils import calculate_num_parts
 from s3transfer.utils import calculate_range_parameter
 from s3transfer.utils import FunctionContainer
 from s3transfer.utils import CountCallbackInvoker
@@ -40,10 +34,6 @@ from s3transfer.tasks import SubmissionTask
 
 
 logger = logging.getLogger(__name__)
-
-S3_RETRYABLE_ERRORS = (
-    socket.timeout, SOCKET_ERROR, ReadTimeoutError, IncompleteReadError
-)
 
 
 class DownloadOutputManager(object):
@@ -108,7 +98,7 @@ class DownloadOutputManager(object):
         self._transfer_coordinator.submit(
             self._io_executor,
             self.get_io_write_task(fileobj, data, offset)
-         )
+        )
 
     def get_io_write_task(self, fileobj, data, offset):
         """Get an IO write task for the requested set of data
@@ -174,7 +164,7 @@ class DownloadFilenameOutputManager(DownloadOutputManager):
     def get_fileobj_for_io_writes(self, transfer_future):
         fileobj = transfer_future.meta.call_args.fileobj
         self._final_filename = fileobj
-        self._temp_filename = fileobj + os.extsep + random_file_extension()
+        self._temp_filename = self._osutil.get_temp_filename(fileobj)
         self._temp_fileobj = self._get_temp_fileobj()
         return self._temp_fileobj
 
@@ -317,7 +307,7 @@ class DownloadSubmissionTask(SubmissionTask):
                 fileobj, type(fileobj)))
 
     def _submit(self, client, config, osutil, request_executor, io_executor,
-                transfer_future):
+                transfer_future, bandwidth_limiter=None):
         """
         :param client: The client associated with the transfer manager
 
@@ -339,6 +329,10 @@ class DownloadSubmissionTask(SubmissionTask):
         :type transfer_future: s3transfer.futures.TransferFuture
         :param transfer_future: The transfer future associated with the
             transfer request that tasks are being submitted for
+
+        :type bandwidth_limiter: s3transfer.bandwidth.BandwidthLimiter
+        :param bandwidth_limiter: The bandwidth limiter to use when
+            downloading streams
         """
         if transfer_future.meta.size is None:
             # If a size was not provided figure out the size for the
@@ -360,15 +354,16 @@ class DownloadSubmissionTask(SubmissionTask):
         if transfer_future.meta.size < config.multipart_threshold:
             self._submit_download_request(
                 client, config, osutil, request_executor, io_executor,
-                download_output_manager, transfer_future)
+                download_output_manager, transfer_future, bandwidth_limiter)
         else:
             self._submit_ranged_download_request(
                 client, config, osutil, request_executor, io_executor,
-                download_output_manager, transfer_future)
+                download_output_manager, transfer_future, bandwidth_limiter)
 
     def _submit_download_request(self, client, config, osutil,
                                  request_executor, io_executor,
-                                 download_output_manager, transfer_future):
+                                 download_output_manager, transfer_future,
+                                 bandwidth_limiter):
         call_args = transfer_future.meta.call_args
 
         # Get a handle to the file that will be used for writing downloaded
@@ -400,6 +395,7 @@ class DownloadSubmissionTask(SubmissionTask):
                     'max_attempts': config.num_download_attempts,
                     'download_output_manager': download_output_manager,
                     'io_chunksize': config.io_chunksize,
+                    'bandwidth_limiter': bandwidth_limiter
                 },
                 done_callbacks=[final_task]
             ),
@@ -409,7 +405,8 @@ class DownloadSubmissionTask(SubmissionTask):
     def _submit_ranged_download_request(self, client, config, osutil,
                                         request_executor, io_executor,
                                         download_output_manager,
-                                        transfer_future):
+                                        transfer_future,
+                                        bandwidth_limiter):
         call_args = transfer_future.meta.call_args
 
         # Get the needed progress callbacks for the task
@@ -422,8 +419,7 @@ class DownloadSubmissionTask(SubmissionTask):
 
         # Determine the number of parts
         part_size = config.multipart_chunksize
-        num_parts = int(
-            math.ceil(transfer_future.meta.size / float(part_size)))
+        num_parts = calculate_num_parts(transfer_future.meta.size, part_size)
 
         # Get any associated tags for the get object task.
         get_object_tag = download_output_manager.get_download_task_tag()
@@ -461,6 +457,7 @@ class DownloadSubmissionTask(SubmissionTask):
                         'start_index': i * part_size,
                         'download_output_manager': download_output_manager,
                         'io_chunksize': config.io_chunksize,
+                        'bandwidth_limiter': bandwidth_limiter
                     },
                     done_callbacks=[finalize_download_invoker.decrement]
                 ),
@@ -488,7 +485,7 @@ class DownloadSubmissionTask(SubmissionTask):
 class GetObjectTask(Task):
     def _main(self, client, bucket, key, fileobj, extra_args, callbacks,
               max_attempts, download_output_manager, io_chunksize,
-              start_index=0):
+              start_index=0, bandwidth_limiter=None):
         """Downloads an object and places content into io queue
 
         :param client: The client to use when calling GetObject
@@ -504,16 +501,22 @@ class GetObjectTask(Task):
             download stream and queue in the io queue.
         :param start_index: The location in the file to start writing the
             content of the key to.
+        :param bandwidth_limiter: The bandwidth limiter to use when throttling
+            the downloading of data in streams.
         """
         last_exception = None
         for i in range(max_attempts):
             try:
+                current_index = start_index
                 response = client.get_object(
                     Bucket=bucket, Key=key, **extra_args)
                 streaming_body = StreamReaderProgress(
                     response['Body'], callbacks)
+                if bandwidth_limiter:
+                    streaming_body = \
+                        bandwidth_limiter.get_bandwith_limited_stream(
+                            streaming_body, self._transfer_coordinator)
 
-                current_index = start_index
                 chunks = DownloadChunkIterator(streaming_body, io_chunksize)
                 for chunk in chunks:
                     # If the transfer is done because of a cancellation
@@ -528,7 +531,7 @@ class GetObjectTask(Task):
                     else:
                         return
                 return
-            except S3_RETRYABLE_ERRORS as e:
+            except S3_RETRYABLE_DOWNLOAD_ERRORS as e:
                 logger.debug("Retrying exception caught (%s), "
                              "retrying request, (attempt %s / %s)", e, i,
                              max_attempts, exc_info=True)
@@ -561,7 +564,7 @@ class IOWriteTask(Task):
     def _main(self, fileobj, data, offset):
         """Pulls off an io queue to write contents to a file
 
-        :param f: The file handle to write content to
+        :param fileobj: The file handle to write content to
         :param data: The data to write
         :param offset: The offset to write the data to.
         """
@@ -588,7 +591,7 @@ class IOStreamingWriteTask(Task):
 class IORenameFileTask(Task):
     """A task to rename a temporary file to its final filename
 
-    :param f: The file handle that content was written to.
+    :param fileobj: The file handle that content was written to.
     :param final_filename: The final name of the file to rename to
         upon completion of writing the contents.
     :param osutil: OS utility

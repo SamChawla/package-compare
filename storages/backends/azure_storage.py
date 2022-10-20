@@ -6,8 +6,7 @@ from time import mktime
 
 from django.core.files.base import ContentFile
 from django.core.exceptions import ImproperlyConfigured
-from django.core.files.storage import Storage
-from django.utils.deconstruct import deconstructible
+from storages.compat import Storage
 
 try:
     import azure  # noqa
@@ -31,7 +30,6 @@ def clean_name(name):
     return os.path.normpath(name).replace("\\", "/")
 
 
-@deconstructible
 class AzureStorage(Storage):
     account_name = setting("AZURE_ACCOUNT_NAME")
     account_key = setting("AZURE_ACCOUNT_KEY")

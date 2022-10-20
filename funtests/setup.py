@@ -8,7 +8,7 @@ except ImportError:
     from ez_setup import use_setuptools
     use_setuptools()
     from setuptools import setup  # noqa
-    from setuptools.command.install import install  # noqa
+    from setuptools.command.install import install # noqa
 
 
 class no_install(install):
@@ -16,9 +16,9 @@ class no_install(install):
     def run(self, *args, **kwargs):
         import sys
         sys.stderr.write("""
--------------------------------------------------------
-The billiard functional test suite cannot be installed.
--------------------------------------------------------
+-----------------------------------------------------------
+The librabbitmq functional test suite cannot be installed.
+-----------------------------------------------------------
 
 
 But you can execute the tests by running the command:
@@ -30,29 +30,29 @@ But you can execute the tests by running the command:
 
 
 setup(
-    name='billiard-funtests',
-    version='DEV',
-    description='Functional test suite for billiard',
-    author='Ask Solem',
-    author_email='ask@celeryproject.org',
-    url='http://github.com/celery/billiard',
-    platforms=['any'],
+    name='librabbitmq-funtests',
+    version="DEV",
+    description="Functional test suite for librabbitmq",
+    author="Ask Solem",
+    author_email="ask@celeryproject.org",
+    url="http://github.com/celery/librabbitmq",
+    platforms=["any"],
     packages=[],
     data_files=[],
     zip_safe=False,
-    cmdclass={'install': no_install},
-    test_suite='nose.collector',
+    cmdclass={"install": no_install},
+    test_suite="nose.collector",
     build_requires=[
-        'nose',
-        'unittest2',
-        'coverage>=3.0',
+        "nose",
+        "nose-cover3",
+        "unittest2",
+        "coverage>=3.0",
     ],
     classifiers=[
-        'Operating System :: OS Independent',
-        'Programming Language :: Python',
-        'Programming Language :: C'
-        'License :: OSI Approved :: BSD License',
-        'Intended Audience :: Developers',
+        "Operating System :: OS Independent",
+        "Programming Language :: Python",
+        "License :: OSI Approved :: BSD License",
+        "Intended Audience :: Developers",
     ],
-    long_description='Do not install this package',
+    long_description="Do not install this package",
 )

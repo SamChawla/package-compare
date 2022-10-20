@@ -1,21 +1,11 @@
 from __future__ import unicode_literals
-
 import datetime
 from dateutil.parser import parse
-import decimal
 from decimal import Decimal
-import importlib
-
+import re
 from django.core.exceptions import ObjectDoesNotExist, MultipleObjectsReturned
-from django.db import models
-try:
-    from django.db.models.fields.related import\
-        SingleRelatedObjectDescriptor as ReverseOneToOneDescriptor
-except ImportError:
-    from django.db.models.fields.related_descriptors import\
-        ReverseOneToOneDescriptor
-from django.utils import datetime_safe, six
-
+from django.utils import datetime_safe, importlib
+from django.utils import six
 from tastypie.bundle import Bundle
 from tastypie.exceptions import ApiFieldError, NotFound
 from tastypie.utils import dict_strip_unicode_keys, make_aware
@@ -26,16 +16,18 @@ class NOT_PROVIDED:
         return 'No default provided.'
 
 
+DATE_REGEX = re.compile('^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2}).*?$')
+DATETIME_REGEX = re.compile('^(?P<year>\d{4})-(?P<month>\d{2})-(?P<day>\d{2})(T|\s+)(?P<hour>\d{2}):(?P<minute>\d{2}):(?P<second>\d{2}).*?$')
+
+
 # All the ApiField variants.
 
 class ApiField(object):
-    "The base implementation of a field used by the resources."
-    is_m2m = False
-    is_related = False
+    """The base implementation of a field used by the resources."""
     dehydrated_type = 'string'
     help_text = ''
 
-    def __init__(self, attribute=None, default=NOT_PROVIDED, null=False, blank=False, readonly=False, unique=False, help_text=None, use_in='all', verbose_name=None):
+    def __init__(self, attribute=None, default=NOT_PROVIDED, null=False, blank=False, readonly=False, unique=False, help_text=None, use_in='all'):
         """
         Sets up the field. This is generally called when the containing
         ``Resource`` is initialized.
@@ -72,27 +64,21 @@ class ApiField(object):
         is a callable, and returns ``True``, the field will be included during
         dehydration.
         Defaults to ``all``.
-
-        Optionally accepts ``verbose_name``, which lets you provide a
-        more verbose name of the field exposed at the schema level.
         """
         # Track what the index thinks this field is called.
         self.instance_name = None
         self._resource = None
         self.attribute = attribute
-        # Check for `__` in the field for looking through the relation.
-        self._attrs = attribute.split('__') if attribute is not None and isinstance(attribute, six.string_types) else []
         self._default = default
         self.null = null
         self.blank = blank
         self.readonly = readonly
+        self.value = None
         self.unique = unique
         self.use_in = 'all'
 
         if use_in in ['all', 'detail', 'list'] or callable(use_in):
             self.use_in = use_in
-
-        self.verbose_name = verbose_name
 
         if help_text:
             self.help_text = help_text
@@ -121,9 +107,11 @@ class ApiField(object):
         resource.
         """
         if self.attribute is not None:
+            # Check for `__` in the field for looking through the relation.
+            attrs = self.attribute.split('__')
             current_object = bundle.obj
 
-            for attr in self._attrs:
+            for attr in attrs:
                 previous_object = current_object
                 current_object = getattr(current_object, attr, None)
 
@@ -167,37 +155,27 @@ class ApiField(object):
         """
         if self.readonly:
             return None
-        if self.instance_name not in bundle.data:
-            if self.is_related and not self.is_m2m:
+        if not self.instance_name in bundle.data:
+            if getattr(self, 'is_related', False) and not getattr(self, 'is_m2m', False):
                 # We've got an FK (or alike field) & a possible parent object.
                 # Check for it.
                 if bundle.related_obj and bundle.related_name in (self.attribute, self.instance_name):
                     return bundle.related_obj
             if self.blank:
                 return None
-            if self.attribute:
-                try:
-                    val = getattr(bundle.obj, self.attribute, None)
-
-                    if val is not None:
-                        return val
-                except ObjectDoesNotExist:
-                    pass
-            if self.instance_name:
-                try:
-                    if hasattr(bundle.obj, self.instance_name):
-                        return getattr(bundle.obj, self.instance_name)
-                except ObjectDoesNotExist:
-                    pass
-            if self.has_default():
+            elif self.attribute and getattr(bundle.obj, self.attribute, None):
+                return getattr(bundle.obj, self.attribute)
+            elif self.instance_name and hasattr(bundle.obj, self.instance_name):
+                return getattr(bundle.obj, self.instance_name)
+            elif self.has_default():
                 if callable(self._default):
                     return self._default()
 
                 return self._default
-            if self.null:
+            elif self.null:
                 return None
-
-            raise ApiFieldError("The '%s' field has no data and doesn't allow a default or null value." % self.instance_name)
+            else:
+                raise ApiFieldError("The '%s' field has no data and doesn't allow a default or null value." % self.instance_name)
 
         return bundle.data[self.instance_name]
 
@@ -287,10 +265,7 @@ class DecimalField(ApiField):
         value = super(DecimalField, self).hydrate(bundle)
 
         if value and not isinstance(value, Decimal):
-            try:
-                value = Decimal(value)
-            except decimal.InvalidOperation:
-                raise ApiFieldError("Invalid decimal string for '%s' field: '%s'" % (self.instance_name, value))
+            value = Decimal(value)
 
         return value
 
@@ -351,11 +326,12 @@ class DateField(ApiField):
             return None
 
         if isinstance(value, six.string_types):
-            try:
-                year, month, day = value[:10].split('-')
+            match = DATE_REGEX.search(value)
 
-                return datetime_safe.date(int(year), int(month), int(day))
-            except ValueError:
+            if match:
+                data = match.groupdict()
+                return datetime_safe.date(int(data['year']), int(data['month']), int(data['day']))
+            else:
                 raise ApiFieldError("Date provided to '%s' field doesn't appear to be a valid date string: '%s'" % (self.instance_name, value))
 
         return value
@@ -388,12 +364,12 @@ class DateTimeField(ApiField):
             return None
 
         if isinstance(value, six.string_types):
-            try:
-                year, month, day = value[:10].split('-')
-                hour, minute, second = value[10:18].split(':')
+            match = DATETIME_REGEX.search(value)
 
-                return make_aware(datetime_safe.datetime(int(year), int(month), int(day), int(hour), int(minute), int(second)))
-            except ValueError:
+            if match:
+                data = match.groupdict()
+                return make_aware(datetime_safe.datetime(int(data['year']), int(data['month']), int(data['day']), int(data['hour']), int(data['minute']), int(data['second'])))
+            else:
                 raise ApiFieldError("Datetime provided to '%s' field doesn't appear to be a valid datetime string: '%s'" % (self.instance_name, value))
 
         return value
@@ -433,10 +409,10 @@ class RelatedField(ApiField):
     """
     dehydrated_type = 'related'
     is_related = True
+    self_referential = False
     help_text = 'A related resource. Can be either a URI or set of nested resource data.'
 
-    def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED, null=False, blank=False, readonly=False, full=False, unique=False, help_text=None, use_in='all', verbose_name=None, full_list=True, full_detail=True):
-
+    def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED, null=False, blank=False, readonly=False, full=False, unique=False, help_text=None, use_in='all', full_list=True, full_detail=True):
         """
         Builds the field and prepares it to access to related data.
 
@@ -480,9 +456,6 @@ class RelatedField(ApiField):
         dehydration.
         Defaults to ``all``.
 
-        Optionally accepts ``verbose_name``, which lets you provide a
-        more verbose name of the field exposed at the schema level.
-
         Optionally accepts a ``full_list``, which indicated whether or not
         data should be fully dehydrated when the request is for a list of
         resources. Accepts ``True``, ``False`` or a callable that accepts
@@ -495,35 +468,56 @@ class RelatedField(ApiField):
         bundle and returns ``True`` or ``False``.Depends on ``full``
         being ``True``. Defaults to ``True``.
         """
-        super(RelatedField, self).__init__(attribute=attribute, default=default, null=null, blank=blank, readonly=readonly, unique=unique, help_text=help_text, use_in=use_in, verbose_name=verbose_name)
-        self.related_name = related_name
+        self.instance_name = None
+        self._resource = None
         self.to = to
-        self._to_class = None
-        self._rel_resources = {}
+        self.attribute = attribute
+        self.related_name = related_name
+        self._default = default
+        self.null = null
+        self.blank = blank
+        self.readonly = readonly
         self.full = full
-        self.full_list = full_list if callable(full_list) else lambda bundle: full_list
-        self.full_detail = full_detail if callable(full_detail) else lambda bundle: full_detail
-
         self.api_name = None
         self.resource_name = None
+        self.unique = unique
+        self._to_class = None
+        self.use_in = 'all'
+        self.full_list = full_list
+        self.full_detail = full_detail
+
+        if use_in in ['all', 'detail', 'list'] or callable(use_in):
+            self.use_in = use_in
+
+        if self.to == 'self':
+            self.self_referential = True
+            self._to_class = self.__class__
+
+        if help_text:
+            self.help_text = help_text
+
+    def contribute_to_class(self, cls, name):
+        super(RelatedField, self).contribute_to_class(cls, name)
+
+        # Check if we're self-referential and hook it up.
+        # We can't do this quite like Django because there's no ``AppCache``
+        # here (which I think we should avoid as long as possible).
+        if self.self_referential or self.to == 'self':
+            self._to_class = cls
 
     def get_related_resource(self, related_instance):
         """
         Instaniates the related resource.
         """
-        related_class = type(related_instance)
-        if related_class in self._rel_resources:
-            return self._rel_resources[related_class]
-
         related_resource = self.to_class()
 
         # Fix the ``api_name`` if it's not present.
         if related_resource._meta.api_name is None:
-            if self._resource and self._resource._meta.api_name is not None:
+            if self._resource and not self._resource._meta.api_name is None:
                 related_resource._meta.api_name = self._resource._meta.api_name
 
-        self._rel_resources[related_class] = related_resource
-
+        # Try to be efficient about DB queries.
+        related_resource.instance = related_instance
         return related_resource
 
     @property
@@ -536,13 +530,6 @@ class RelatedField(ApiField):
 
         if not isinstance(self.to, six.string_types):
             self._to_class = self.to
-            return self._to_class
-
-        # Check if we're self-referential and hook it up.
-        # We can't do this quite like Django because there's no ``AppCache``
-        # here (which I think we should avoid as long as possible).
-        if self.to == 'self':
-            self._to_class = self._resource
             return self._to_class
 
         # It's a string. Let's figure it out.
@@ -576,7 +563,7 @@ class RelatedField(ApiField):
         else:
             # ZOMG extra data and big payloads.
             bundle = related_resource.build_bundle(
-                obj=bundle.obj,
+                obj=related_resource.instance,
                 request=bundle.request,
                 objects_saved=bundle.objects_saved
             )
@@ -587,21 +574,15 @@ class RelatedField(ApiField):
         Given a URI is provided, the related resource is attempted to be
         loaded based on the identifiers in the URI.
         """
-        err_msg = "Could not find the provided %s object via resource URI '%s'." % (fk_resource._meta.resource_name, uri,)
-
-        if not uri:
-            raise ApiFieldError(err_msg)
-
         try:
             obj = fk_resource.get_via_uri(uri, request=request)
             bundle = fk_resource.build_bundle(
                 obj=obj,
-                request=request,
-                via_uri=True
+                request=request
             )
             return fk_resource.full_dehydrate(bundle)
         except ObjectDoesNotExist:
-            raise ApiFieldError(err_msg)
+            raise ApiFieldError("Could not find the provided object via resource URI '%s'." % uri)
 
     def resource_from_data(self, fk_resource, data, request=None, related_obj=None, related_name=None):
         """
@@ -610,18 +591,8 @@ class RelatedField(ApiField):
         """
         # Try to hydrate the data provided.
         data = dict_strip_unicode_keys(data)
-        obj = None
-        if getattr(fk_resource._meta, 'include_resource_uri', True) and 'resource_uri' in data:
-            uri = data['resource_uri']
-            err_msg = "Could not find the provided %s object via resource URI '%s'." % (fk_resource._meta.resource_name, uri,)
-            try:
-                obj = fk_resource.get_via_uri(uri, request=request)
-            except ObjectDoesNotExist:
-                raise ApiFieldError(err_msg)
-
         fk_bundle = fk_resource.build_bundle(
             data=data,
-            obj=obj,
             request=request
         )
 
@@ -629,24 +600,20 @@ class RelatedField(ApiField):
             fk_bundle.related_obj = related_obj
             fk_bundle.related_name = related_name
 
-        unique_keys = {
-            k: v
-            for k, v in data.items()
-            if k == 'pk' or (hasattr(fk_resource, k) and getattr(fk_resource, k).unique)
-        }
+        unique_keys = dict((k, v) for k, v in data.items() if k == 'pk' or (hasattr(fk_resource, k) and getattr(fk_resource, k).unique))
 
         # If we have no unique keys, we shouldn't go look for some resource that
         # happens to match other kwargs. In the case of a create, it might be the
         # completely wrong resource.
         # We also need to check to see if updates are allowed on the FK resource.
-        if not obj and unique_keys:
+        if unique_keys and fk_resource.can_update():
             try:
-                fk_resource.obj_get(fk_bundle, skip_errors=True, **data)
-            except (ObjectDoesNotExist, NotFound, TypeError):
+                return fk_resource.obj_update(fk_bundle, skip_errors=True, **data)
+            except (NotFound, TypeError):
                 try:
                     # Attempt lookup by primary key
-                    fk_resource.obj_get(fk_bundle, skip_errors=True, **unique_keys)
-                except (ObjectDoesNotExist, NotFound):
+                    return fk_resource.obj_update(fk_bundle, skip_errors=True, **unique_keys)
+                except NotFound:
                     pass
             except MultipleObjectsReturned:
                 pass
@@ -677,7 +644,7 @@ class RelatedField(ApiField):
         Accepts either a URI, a data dictionary (or dictionary-like structure)
         or an object with a ``pk``.
         """
-        fk_resource = self.to_class()
+        self.fk_resource = self.to_class()
         kwargs = {
             'request': request,
             'related_obj': related_obj,
@@ -689,15 +656,15 @@ class RelatedField(ApiField):
             return value
         elif isinstance(value, six.string_types):
             # We got a URI. Load the object and assign it.
-            return self.resource_from_uri(fk_resource, value, **kwargs)
-        elif isinstance(value, dict):
+            return self.resource_from_uri(self.fk_resource, value, **kwargs)
+        elif hasattr(value, 'items'):
             # We've got a data dictionary.
             # Since this leads to creation, this is the only one of these
             # methods that might care about "parent" data.
-            return self.resource_from_data(fk_resource, value, **kwargs)
+            return self.resource_from_data(self.fk_resource, value, **kwargs)
         elif hasattr(value, 'pk'):
             # We've got an object with a primary key.
-            return self.resource_from_pk(fk_resource, value, **kwargs)
+            return self.resource_from_pk(self.fk_resource, value, **kwargs)
         else:
             raise ApiFieldError("The '%s' field was given data that was not a URI, not a dictionary-alike and does not have a 'pk' attribute: %s." % (self.instance_name, value))
 
@@ -710,10 +677,10 @@ class RelatedField(ApiField):
         if self.full:
             is_details_view = not for_list
             if is_details_view:
-                if self.full_detail(bundle):
+                if (not callable(self.full_detail) and self.full_detail) or (callable(self.full_detail) and self.full_detail(bundle)):
                     should_dehydrate_full_resource = True
             else:
-                if self.full_list(bundle):
+                if (not callable(self.full_list) and self.full_list) or (callable(self.full_list) and self.full_list(bundle)):
                     should_dehydrate_full_resource = True
 
         return should_dehydrate_full_resource
@@ -729,56 +696,46 @@ class ToOneField(RelatedField):
 
     def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED,
                  null=False, blank=False, readonly=False, full=False,
-                 unique=False, help_text=None, use_in='all', verbose_name=None,
-                 full_list=True, full_detail=True):
+                 unique=False, help_text=None, use_in='all', full_list=True, full_detail=True):
         super(ToOneField, self).__init__(
             to, attribute, related_name=related_name, default=default,
             null=null, blank=blank, readonly=readonly, full=full,
             unique=unique, help_text=help_text, use_in=use_in,
-            verbose_name=verbose_name, full_list=full_list,
-            full_detail=full_detail
+            full_list=full_list, full_detail=full_detail
         )
-
-    def contribute_to_class(self, cls, name):
-        super(ToOneField, self).contribute_to_class(cls, name)
-        if not self.related_name:
-            related_field = getattr(self._resource._meta.object_class, self.attribute, None)
-            if isinstance(related_field, ReverseOneToOneDescriptor):
-                # This is the case when we are writing to a reverse one to one field.
-                # Enable related name to make this work fantastically.
-                # see https://code.djangoproject.com/ticket/18638 (bug; closed; worksforme)
-                # and https://github.com/django-tastypie/django-tastypie/issues/566
-
-                # this gets the related_name of the one to one field of our model
-                self.related_name = related_field.related.field.name
+        self.fk_resource = None
 
     def dehydrate(self, bundle, for_list=True):
         foreign_obj = None
+        error_to_raise = None
 
-        if callable(self.attribute):
-            previous_obj = bundle.obj
-            foreign_obj = self.attribute(bundle)
-        elif isinstance(self.attribute, six.string_types):
+        if isinstance(self.attribute, six.string_types):
+            attrs = self.attribute.split('__')
             foreign_obj = bundle.obj
 
-            for attr in self._attrs:
+            for attr in attrs:
                 previous_obj = foreign_obj
                 try:
                     foreign_obj = getattr(foreign_obj, attr, None)
                 except ObjectDoesNotExist:
                     foreign_obj = None
-
+        
+        elif callable(self.attribute):
+            previous_obj = bundle.obj
+            foreign_obj = self.attribute(bundle)
+            
         if not foreign_obj:
             if not self.null:
                 if callable(self.attribute):
                     raise ApiFieldError("The related resource for resource %s could not be found." % (previous_obj))
                 else:
                     raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (previous_obj, attr))
-            return None
+            
+            return None        
 
-        fk_resource = self.get_related_resource(foreign_obj)
+        self.fk_resource = self.get_related_resource(foreign_obj)
         fk_bundle = Bundle(obj=foreign_obj, request=bundle.request)
-        return self.dehydrate_related(fk_bundle, fk_resource, for_list=for_list)
+        return self.dehydrate_related(fk_bundle, self.fk_resource, for_list=for_list)
 
     def hydrate(self, bundle):
         value = super(ToOneField, self).hydrate(bundle)
@@ -787,7 +744,6 @@ class ToOneField(RelatedField):
             return value
 
         return self.build_related_resource(value, request=bundle.request)
-
 
 class ForeignKey(ToOneField):
     """
@@ -818,15 +774,14 @@ class ToManyField(RelatedField):
 
     def __init__(self, to, attribute, related_name=None, default=NOT_PROVIDED,
                  null=False, blank=False, readonly=False, full=False,
-                 unique=False, help_text=None, use_in='all', verbose_name=None,
-                 full_list=True, full_detail=True):
+                 unique=False, help_text=None, use_in='all', full_list=True, full_detail=True):
         super(ToManyField, self).__init__(
             to, attribute, related_name=related_name, default=default,
             null=null, blank=blank, readonly=readonly, full=full,
             unique=unique, help_text=help_text, use_in=use_in,
-            verbose_name=verbose_name, full_list=full_list,
-            full_detail=full_detail
+            full_list=full_list, full_detail=full_detail
         )
+        self.m2m_bundles = []
 
     def dehydrate(self, bundle, for_list=True):
         if not bundle.obj or not bundle.obj.pk:
@@ -839,12 +794,11 @@ class ToManyField(RelatedField):
         previous_obj = bundle.obj
         attr = self.attribute
 
-        if callable(self.attribute):
-            the_m2ms = self.attribute(bundle)
-        elif isinstance(self.attribute, six.string_types):
+        if isinstance(self.attribute, six.string_types):
+            attrs = self.attribute.split('__')
             the_m2ms = bundle.obj
 
-            for attr in self._attrs:
+            for attr in attrs:
                 previous_obj = the_m2ms
                 try:
                     the_m2ms = getattr(the_m2ms, attr, None)
@@ -854,23 +808,25 @@ class ToManyField(RelatedField):
                 if not the_m2ms:
                     break
 
+        elif callable(self.attribute):
+            the_m2ms = self.attribute(bundle)
+
         if not the_m2ms:
             if not self.null:
                 raise ApiFieldError("The model '%r' has an empty attribute '%s' and doesn't allow a null value." % (previous_obj, attr))
 
             return []
 
-        if isinstance(the_m2ms, models.Manager):
-            the_m2ms = the_m2ms.all()
+        self.m2m_resources = []
+        m2m_dehydrated = []
 
-        m2m_dehydrated = [
-            self.dehydrate_related(
-                Bundle(obj=m2m, request=bundle.request),
-                self.get_related_resource(m2m),
-                for_list=for_list
-            )
-            for m2m in the_m2ms
-        ]
+        # TODO: Also model-specific and leaky. Relies on there being a
+        #       ``Manager`` there.
+        for m2m in the_m2ms.all():
+            m2m_resource = self.get_related_resource(m2m)
+            m2m_bundle = Bundle(obj=m2m, request=bundle.request)
+            self.m2m_resources.append(m2m_resource)
+            m2m_dehydrated.append(self.dehydrate_related(m2m_bundle, m2m_resource, for_list=for_list))
 
         return m2m_dehydrated
 
@@ -884,23 +840,28 @@ class ToManyField(RelatedField):
         if bundle.data.get(self.instance_name) is None:
             if self.blank:
                 return []
-            if self.null:
+            elif self.null:
                 return []
-            raise ApiFieldError("The '%s' field has no data and doesn't allow a null value." % self.instance_name)
+            else:
+                raise ApiFieldError("The '%s' field has no data and doesn't allow a null value." % self.instance_name)
 
-        kwargs = {
-            'request': bundle.request,
-        }
+        m2m_hydrated = []
 
-        if self.related_name:
-            kwargs['related_obj'] = bundle.obj
-            kwargs['related_name'] = self.related_name
+        for value in bundle.data.get(self.instance_name):
+            if value is None:
+                continue
 
-        return [
-            self.build_related_resource(value, **kwargs)
-            for value in bundle.data.get(self.instance_name)
-            if value is not None
-        ]
+            kwargs = {
+                'request': bundle.request,
+            }
+
+            if self.related_name:
+                kwargs['related_obj'] = bundle.obj
+                kwargs['related_name'] = self.related_name
+
+            m2m_hydrated.append(self.build_related_resource(value, **kwargs))
+
+        return m2m_hydrated
 
 
 class ManyToManyField(ToManyField):
@@ -935,7 +896,7 @@ class TimeField(ApiField):
         except (ValueError, TypeError) as e:
             raise ApiFieldError(str(e))
         else:
-            return datetime.time(dt.hour, dt.minute, dt.second, dt.microsecond)
+            return datetime.time(dt.hour, dt.minute, dt.second)
 
     def hydrate(self, bundle):
         value = super(TimeField, self).hydrate(bundle)

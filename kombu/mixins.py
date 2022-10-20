@@ -28,6 +28,14 @@ __all__ = ['ConsumerMixin']
 logger = get_logger(__name__)
 debug, info, warn, error = logger.debug, logger.info, logger.warn, logger.error
 
+W_CONN_LOST = """\
+Connection to broker lost, trying to re-establish connection...\
+"""
+
+W_CONN_ERROR = """\
+Broker connection error, trying again in %s seconds: %r.\
+"""
+
 
 class ConsumerMixin(object):
     """Convenience mixin for implementing consumer programs.
@@ -55,7 +63,7 @@ class ConsumerMixin(object):
 
             def get_consumers(self, Consumer, channel):
                 return [Consumer(queues=[self.task_queue],
-                                 callback=[self.on_task])]
+                                 callbacks=[self.on_task])]
 
             def on_task(self, body, message):
                 print('Got task: {0!r}'.format(body))
@@ -153,8 +161,7 @@ class ConsumerMixin(object):
         message.ack()
 
     def on_connection_error(self, exc, interval):
-        warn('Broker connection error: %r. '
-             'Trying again in %s seconds.', exc, interval)
+        warn(W_CONN_ERROR, interval, exc, exc_info=1)
 
     @contextmanager
     def extra_context(self, connection, channel):
@@ -172,8 +179,7 @@ class ConsumerMixin(object):
                 else:
                     sleep(restart_limit.expected_time(_tokens))
             except errors:
-                warn('Connection to broker lost. '
-                     'Trying to re-establish the connection...')
+                warn(W_CONN_LOST, exc_info=1)
 
     @contextmanager
     def consumer_context(self, **kwargs):

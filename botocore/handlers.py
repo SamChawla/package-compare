@@ -18,24 +18,30 @@ This module contains builtin handlers for events emitted by botocore.
 
 import base64
 import logging
-import xml.etree.cElementTree
 import copy
 import re
 import warnings
 import uuid
 
-from botocore.compat import unquote, json, six, unquote_str, \
-    ensure_bytes, get_md5, MD5_AVAILABLE
+from botocore.compat import (
+    unquote, json, six, unquote_str, ensure_bytes, get_md5,
+    MD5_AVAILABLE, OrderedDict, urlsplit, urlunsplit, XMLParseError,
+    ETree,
+)
 from botocore.docs.utils import AutoPopulatedParam
 from botocore.docs.utils import HideParamFromOperations
 from botocore.docs.utils import AppendParamDocumentation
 from botocore.signers import add_generate_presigned_url
 from botocore.signers import add_generate_presigned_post
+from botocore.signers import add_generate_db_auth_token
 from botocore.exceptions import ParamValidationError
 from botocore.exceptions import AliasConflictParameterError
 from botocore.exceptions import UnsupportedTLSVersionWarning
+from botocore.exceptions import MissingServiceIdError
 from botocore.utils import percent_encode, SAFE_CHARS
 from botocore.utils import switch_host_with_param
+from botocore.utils import hyphenize_service_id
+from botocore.utils import conditionally_calculate_md5
 
 from botocore import retryhandler
 from botocore import utils
@@ -53,8 +59,51 @@ REGISTER_LAST = object()
 # to be as long as 255 characters, and bucket names can contain any
 # combination of uppercase letters, lowercase letters, numbers, periods
 # (.), hyphens (-), and underscores (_).
-VALID_BUCKET = re.compile('^[a-zA-Z0-9.\-_]{1,255}$')
+VALID_BUCKET = re.compile(r'^[a-zA-Z0-9.\-_]{1,255}$')
+_ACCESSPOINT_ARN = (
+    r'^arn:(aws).*:(s3|s3-object-lambda):[a-z\-0-9]+:[0-9]{12}:accesspoint[/:]'
+    r'[a-zA-Z0-9\-]{1,63}$'
+)
+_OUTPOST_ARN = (
+    r'^arn:(aws).*:s3-outposts:[a-z\-0-9]+:[0-9]{12}:outpost[/:]'
+    r'[a-zA-Z0-9\-]{1,63}[/:]accesspoint[/:][a-zA-Z0-9\-]{1,63}$'
+)
+VALID_S3_ARN = re.compile('|'.join([_ACCESSPOINT_ARN, _OUTPOST_ARN]))
 VERSION_ID_SUFFIX = re.compile(r'\?versionId=[^\s]+$')
+
+SERVICE_NAME_ALIASES = {
+    'runtime.sagemaker': 'sagemaker-runtime'
+}
+
+
+def handle_service_name_alias(service_name, **kwargs):
+    return SERVICE_NAME_ALIASES.get(service_name, service_name)
+
+
+def escape_xml_payload(params, **kwargs):
+    # Replace \r and \n with the escaped sequence over the whole XML document
+    # to avoid linebreak normalization modifying customer input when the
+    # document is parsed. Ideally, we would do this in ElementTree.tostring,
+    # but it doesn't allow us to override entity escaping for text fields. For
+    # this operation \r and \n can only appear in the XML document if they were
+    # passed as part of the customer input.
+    body = params['body']
+    replaced = False
+    if b'\r' in body:
+        replaced = True
+        body = body.replace(b'\r', b'&#xD;')
+    if b'\n' in body:
+        replaced = True
+        body = body.replace(b'\n', b'&#xA;')
+
+    if not replaced:
+        return
+
+    params['body'] = body
+    if 'Content-MD5' in params['headers']:
+        # The Content-MD5 is now wrong, so we'll need to recalculate it
+        del params['headers']['Content-MD5']
+        conditionally_calculate_md5(params, **kwargs)
 
 
 def check_for_200_error(response, **kwargs):
@@ -87,11 +136,17 @@ def check_for_200_error(response, **kwargs):
 
 def _looks_like_special_case_error(http_response):
     if http_response.status_code == 200:
-        parser = xml.etree.cElementTree.XMLParser(
-            target=xml.etree.cElementTree.TreeBuilder(),
-            encoding='utf-8')
-        parser.feed(http_response.content)
-        root = parser.close()
+        try:
+            parser = ETree.XMLParser(
+                target=ETree.TreeBuilder(),
+                encoding='utf-8')
+            parser.feed(http_response.content)
+            root = parser.close()
+        except XMLParseError:
+            # In cases of network disruptions, we may end up with a partial
+            # streamed response from S3. We need to treat these cases as
+            # 500 Service Errors and try again.
+            return True
         if root.tag == 'Error':
             return True
     return False
@@ -162,52 +217,22 @@ def decode_quoted_jsondoc(value):
 def json_decode_template_body(parsed, **kwargs):
     if 'TemplateBody' in parsed:
         try:
-            value = json.loads(parsed['TemplateBody'])
+            value = json.loads(
+                parsed['TemplateBody'], object_pairs_hook=OrderedDict)
             parsed['TemplateBody'] = value
         except (ValueError, TypeError):
             logger.debug('error loading JSON', exc_info=True)
-
-
-def calculate_md5(params, **kwargs):
-    request_dict = params
-    if request_dict['body'] and 'Content-MD5' not in params['headers']:
-        body = request_dict['body']
-        if isinstance(body, (bytes, bytearray)):
-            binary_md5 = _calculate_md5_from_bytes(body)
-        else:
-            binary_md5 = _calculate_md5_from_file(body)
-        base64_md5 = base64.b64encode(binary_md5).decode('ascii')
-        params['headers']['Content-MD5'] = base64_md5
-
-
-def _calculate_md5_from_bytes(body_bytes):
-    md5 = get_md5(body_bytes)
-    return md5.digest()
-
-
-def _calculate_md5_from_file(fileobj):
-    start_position = fileobj.tell()
-    md5 = get_md5()
-    for chunk in iter(lambda: fileobj.read(1024 * 1024), b''):
-        md5.update(chunk)
-    fileobj.seek(start_position)
-    return md5.digest()
-
-
-def conditionally_calculate_md5(params, context, request_signer, **kwargs):
-    """Only add a Content-MD5 if the system supports it."""
-    if MD5_AVAILABLE:
-        calculate_md5(params, **kwargs)
 
 
 def validate_bucket_name(params, **kwargs):
     if 'Bucket' not in params:
         return
     bucket = params['Bucket']
-    if VALID_BUCKET.search(bucket) is None:
+    if not VALID_BUCKET.search(bucket) and not VALID_S3_ARN.search(bucket):
         error_msg = (
             'Invalid bucket name "%s": Bucket name must match '
-            'the regex "%s"' % (bucket, VALID_BUCKET.pattern))
+            'the regex "%s" or be an ARN matching the regex "%s"' % (
+                bucket, VALID_BUCKET.pattern, VALID_S3_ARN.pattern))
         raise ParamValidationError(report=error_msg)
 
 
@@ -252,49 +277,6 @@ def _needs_s3_sse_customization(params, sse_member_prefix):
             sse_member_prefix + 'KeyMD5' not in params)
 
 
-def register_retries_for_service(service_data, session,
-                                 service_name, **kwargs):
-    loader = session.get_component('data_loader')
-    endpoint_prefix = service_data.get('metadata', {}).get('endpointPrefix')
-    if endpoint_prefix is None:
-        logger.debug("Not registering retry handlers, could not endpoint "
-                     "prefix from model for service %s", service_name)
-        return
-    config = _load_retry_config(loader, endpoint_prefix)
-    if not config:
-        return
-    logger.debug("Registering retry handlers for service: %s", service_name)
-    handler = retryhandler.create_retry_handler(
-        config, endpoint_prefix)
-    unique_id = 'retry-config-%s' % endpoint_prefix
-    session.register('needs-retry.%s' % endpoint_prefix,
-                     handler, unique_id=unique_id)
-    _register_for_operations(config, session,
-                             service_name=endpoint_prefix)
-
-
-def _load_retry_config(loader, endpoint_prefix):
-    original_config = loader.load_data('_retry')
-    retry_config = translate.build_retry_config(
-        endpoint_prefix, original_config['retry'],
-        original_config.get('definitions', {}))
-    return retry_config
-
-
-def _register_for_operations(config, session, service_name):
-    # There's certainly a tradeoff for registering the retry config
-    # for the operations when the service is created.  In practice,
-    # there aren't a whole lot of per operation retry configs so
-    # this is ok for now.
-    for key in config:
-        if key == '__default__':
-            continue
-        handler = retryhandler.create_retry_handler(config, key)
-        unique_id = 'retry-config-%s-%s' % (service_name, key)
-        session.register('needs-retry.%s.%s' % (service_name, key),
-                         handler, unique_id=unique_id)
-
-
 def disable_signing(**kwargs):
     """
     This handler disables request signing by setting the signer
@@ -313,6 +295,21 @@ def add_expect_header(model, params, **kwargs):
             # header regardless of size.
             logger.debug("Adding expect 100 continue header to request.")
             params['headers']['Expect'] = '100-continue'
+
+
+class DeprecatedServiceDocumenter(object):
+    def __init__(self, replacement_service_name):
+        self._replacement_service_name = replacement_service_name
+
+    def inject_deprecation_notice(self, section, event_name, **kwargs):
+        section.style.start_important()
+        section.write('This service client is deprecated. Please use ')
+        section.style.ref(
+            self._replacement_service_name,
+            self._replacement_service_name,
+        )
+        section.write(' instead.')
+        section.style.end_important()
 
 
 def document_copy_source_form(section, event_name, **kwargs):
@@ -341,6 +338,12 @@ def document_copy_source_form(section, event_name, **kwargs):
             "the string format because it is more explicit.  The dictionary "
             "format is: {'Bucket': 'bucket', 'Key': 'key', 'VersionId': 'id'}."
             "  Note that the VersionId key is optional and may be omitted."
+            " To specify an S3 access point, provide the access point"
+            " ARN for the ``Bucket`` key in the copy source dictionary. If you"
+            " want to provide the copy source for an S3 access point as a"
+            " string instead of a dictionary, the ARN provided must be the"
+            " full S3 access point object ARN"
+            " (i.e. {accesspoint_arn}/object/{key})"
         )
 
 
@@ -374,12 +377,16 @@ def handle_copy_source_param(params, **kwargs):
 def _quote_source_header_from_dict(source_dict):
     try:
         bucket = source_dict['Bucket']
-        key = percent_encode(source_dict['Key'], safe=SAFE_CHARS + '/')
+        key = source_dict['Key']
         version_id = source_dict.get('VersionId')
+        if VALID_S3_ARN.search(bucket):
+            final = '%s/object/%s' % (bucket, key)
+        else:
+            final = '%s/%s' % (bucket, key)
     except KeyError as e:
         raise ParamValidationError(
             report='Missing required parameter: %s' % str(e))
-    final = '%s/%s' % (bucket, key)
+    final = percent_encode(final, safe=SAFE_CHARS + '/')
     if version_id is not None:
         final += '?versionId=%s' % version_id
     return final
@@ -495,12 +502,11 @@ def parse_get_bucket_location(parsed, http_response, **kwargs):
     # The "parsed" passed in only has the ResponseMetadata
     # filled out.  This handler will fill in the LocationConstraint
     # value.
-    if 'LocationConstraint' in parsed:
-        # Response already set - a stub?
+    if http_response.raw is None:
         return
     response_body = http_response.content
-    parser = xml.etree.cElementTree.XMLParser(
-        target=xml.etree.cElementTree.TreeBuilder(),
+    parser = ETree.XMLParser(
+        target=ETree.TreeBuilder(),
         encoding='utf-8')
     parser.feed(response_body)
     root = parser.close()
@@ -670,7 +676,7 @@ def check_openssl_supports_tls_version_1_2(**kwargs):
     import ssl
     try:
         openssl_version_tuple = ssl.OPENSSL_VERSION_INFO
-        if openssl_version_tuple[0] < 1 or openssl_version_tuple[2] < 1:
+        if openssl_version_tuple < (1, 0, 1):
             warnings.warn(
                 'Currently installed openssl version: %s does not '
                 'support TLS 1.2, which is required for use of iot-data. '
@@ -710,15 +716,57 @@ def decode_list_object(parsed, context, **kwargs):
     # Amazon S3 includes this element in the response, and returns encoded key
     # name values in the following response elements:
     # Delimiter, Marker, Prefix, NextMarker, Key.
+    _decode_list_object(
+        top_level_keys=['Delimiter', 'Marker', 'NextMarker'],
+        nested_keys=[('Contents', 'Key'), ('CommonPrefixes', 'Prefix')],
+        parsed=parsed,
+        context=context
+    )
+
+
+def decode_list_object_v2(parsed, context, **kwargs):
+    # From the documentation: If you specify encoding-type request parameter,
+    # Amazon S3 includes this element in the response, and returns encoded key
+    # name values in the following response elements:
+    # Delimiter, Prefix, ContinuationToken, Key, and StartAfter.
+    _decode_list_object(
+        top_level_keys=['Delimiter', 'Prefix', 'StartAfter'],
+        nested_keys=[('Contents', 'Key'), ('CommonPrefixes', 'Prefix')],
+        parsed=parsed,
+        context=context
+    )
+
+
+def decode_list_object_versions(parsed, context, **kwargs):
+    # From the documentation: If you specify encoding-type request parameter,
+    # Amazon S3 includes this element in the response, and returns encoded key
+    # name values in the following response elements:
+    # KeyMarker, NextKeyMarker, Prefix, Key, and Delimiter.
+    _decode_list_object(
+        top_level_keys=[
+            'KeyMarker',
+            'NextKeyMarker',
+            'Prefix',
+            'Delimiter',
+        ],
+        nested_keys=[
+            ('Versions', 'Key'),
+            ('DeleteMarkers', 'Key'),
+            ('CommonPrefixes', 'Prefix'),
+        ],
+        parsed=parsed,
+        context=context
+    )
+
+
+def _decode_list_object(top_level_keys, nested_keys, parsed, context):
     if parsed.get('EncodingType') == 'url' and \
                     context.get('encoding_type_auto_set'):
         # URL decode top-level keys in the response if present.
-        top_level_keys = ['Delimiter', 'Marker', 'NextMarker']
         for key in top_level_keys:
             if key in parsed:
                 parsed[key] = unquote_str(parsed[key])
         # URL decode nested keys from the response if present.
-        nested_keys = [('Contents', 'Key'), ('CommonPrefixes', 'Prefix')]
         for (top_key, child_key) in nested_keys:
             if top_key in parsed:
                 for member in parsed[top_key]:
@@ -826,11 +874,73 @@ class ClientMethodAlias(object):
     def __call__(self, client, **kwargs):
         return getattr(client, self._actual)
 
+
+# TODO: Remove this class as it is no longer used
+class HeaderToHostHoister(object):
+    """Takes a header and moves it to the front of the hoststring.
+    """
+    _VALID_HOSTNAME = re.compile(r'(?!-)[a-z\d-]{1,63}(?<!-)$', re.IGNORECASE)
+
+    def __init__(self, header_name):
+        self._header_name = header_name
+
+    def hoist(self, params, **kwargs):
+        """Hoist a header to the hostname.
+
+        Hoist a header to the beginning of the hostname with a suffix "." after
+        it. The original header should be removed from the header map. This
+        method is intended to be used as a target for the before-call event.
+        """
+        if self._header_name not in params['headers']:
+            return
+        header_value = params['headers'][self._header_name]
+        self._ensure_header_is_valid_host(header_value)
+        original_url = params['url']
+        new_url = self._prepend_to_host(original_url, header_value)
+        params['url'] = new_url
+
+    def _ensure_header_is_valid_host(self, header):
+        match = self._VALID_HOSTNAME.match(header)
+        if not match:
+            raise ParamValidationError(report=(
+                'Hostnames must contain only - and alphanumeric characters, '
+                'and between 1 and 63 characters long.'
+            ))
+
+    def _prepend_to_host(self, url, prefix):
+        url_components = urlsplit(url)
+        parts = url_components.netloc.split('.')
+        parts = [prefix] + parts
+        new_netloc = '.'.join(parts)
+        new_components = (
+            url_components.scheme,
+            new_netloc,
+            url_components.path,
+            url_components.query,
+            ''
+        )
+        new_url = urlunsplit(new_components)
+        return new_url
+
+
+def inject_api_version_header_if_needed(model, params, **kwargs):
+    if not model.is_endpoint_discovery_operation:
+        return
+    params['headers']['x-amz-api-version'] = model.service_model.api_version
+
+
+def remove_lex_v2_start_conversation(class_attributes, **kwargs):
+    """Operation requires h2 which is currently unsupported in Python"""
+    if 'start_conversation' in class_attributes:
+        del class_attributes['start_conversation']
+
+
 # This is a list of (event_name, handler).
 # When a Session is created, everything in this list will be
 # automatically registered with that Session.
 
 BUILTIN_HANDLERS = [
+    ('choose-service-name', handle_service_name_alias),
     ('getattr.mturk.list_hi_ts_for_qualification_type',
      ClientMethodAlias('list_hits_for_qualification_type')),
     ('before-parameter-build.s3.UploadPart',
@@ -840,6 +950,7 @@ BUILTIN_HANDLERS = [
     ('creating-client-class', add_generate_presigned_url),
     ('creating-client-class.s3', add_generate_presigned_post),
     ('creating-client-class.iot-data', check_openssl_supports_tls_version_1_2),
+    ('creating-client-class.lex-runtime-v2', remove_lex_v2_start_conversation),
     ('after-call.iam', json_decode_policies),
 
     ('after-call.ec2.GetConsoleOutput', decode_console_output),
@@ -852,23 +963,10 @@ BUILTIN_HANDLERS = [
 
     ('before-parameter-build.s3.ListObjects',
      set_list_objects_encoding_type_url),
-    ('before-call.s3.PutBucketTagging', calculate_md5),
-    ('before-call.s3.PutBucketLifecycle', calculate_md5),
-    ('before-call.s3.PutBucketLifecycleConfiguration', calculate_md5),
-    ('before-call.s3.PutBucketCors', calculate_md5),
-    ('before-call.s3.DeleteObjects', calculate_md5),
-    ('before-call.s3.PutBucketReplication', calculate_md5),
-    ('before-call.s3.PutObject', conditionally_calculate_md5),
-    ('before-call.s3.UploadPart', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketAcl', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketLogging', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketNotification', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketPolicy', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketRequestPayment', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketVersioning', conditionally_calculate_md5),
-    ('before-call.s3.PutBucketWebsite', conditionally_calculate_md5),
-    ('before-call.s3.PutObjectAcl', conditionally_calculate_md5),
-
+    ('before-parameter-build.s3.ListObjectsV2',
+     set_list_objects_encoding_type_url),
+    ('before-parameter-build.s3.ListObjectVersions',
+     set_list_objects_encoding_type_url),
     ('before-parameter-build.s3.CopyObject',
      handle_copy_source_param),
     ('before-parameter-build.s3.UploadPartCopy',
@@ -883,23 +981,18 @@ BUILTIN_HANDLERS = [
     ('before-call.s3', add_expect_header),
     ('before-call.glacier', add_glacier_version),
     ('before-call.apigateway', add_accept_header),
+    ('before-call.s3.PutObject', conditionally_calculate_md5),
+    ('before-call.s3.UploadPart', conditionally_calculate_md5),
+    ('before-call.s3.DeleteObjects', escape_xml_payload),
+    ('before-call.s3.PutBucketLifecycleConfiguration', escape_xml_payload),
     ('before-call.glacier.UploadArchive', add_glacier_checksums),
     ('before-call.glacier.UploadMultipartPart', add_glacier_checksums),
     ('before-call.ec2.CopySnapshot', inject_presigned_url_ec2),
-    ('before-call.rds.CopyDBClusterSnapshot',
-     inject_presigned_url_rds),
-    ('before-call.rds.CreateDBCluster',
-     inject_presigned_url_rds),
-    ('before-call.rds.CopyDBSnapshot',
-     inject_presigned_url_rds),
-    ('before-call.rds.CreateDBInstanceReadReplica',
-     inject_presigned_url_rds),
     ('request-created.machinelearning.Predict', switch_host_machinelearning),
     ('needs-retry.s3.UploadPartCopy', check_for_200_error, REGISTER_FIRST),
     ('needs-retry.s3.CopyObject', check_for_200_error, REGISTER_FIRST),
     ('needs-retry.s3.CompleteMultipartUpload', check_for_200_error,
      REGISTER_FIRST),
-    ('service-data-loaded', register_retries_for_service),
     ('choose-signer.cognito-identity.GetId', disable_signing),
     ('choose-signer.cognito-identity.GetOpenIdToken', disable_signing),
     ('choose-signer.cognito-identity.UnlinkIdentity', disable_signing),
@@ -923,6 +1016,8 @@ BUILTIN_HANDLERS = [
     ('before-parameter-build.route53', fix_route53_ids),
     ('before-parameter-build.glacier', inject_account_id),
     ('after-call.s3.ListObjects', decode_list_object),
+    ('after-call.s3.ListObjectsV2', decode_list_object_v2),
+    ('after-call.s3.ListObjectVersions', decode_list_object_versions),
 
     # Cloudsearchdomain search operation will be sent by HTTP POST
     ('request-created.cloudsearchdomain.Search',
@@ -948,16 +1043,6 @@ BUILTIN_HANDLERS = [
     ('docs.*.autoscaling.CreateLaunchConfiguration.complete-section',
      document_base64_encoding('UserData')),
 
-    # RDS PresignedUrl documentation customizations
-    ('docs.*.rds.CopyDBClusterSnapshot.complete-section',
-     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
-    ('docs.*.rds.CreateDBCluster.complete-section',
-     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
-    ('docs.*.rds.CopyDBSnapshot.complete-section',
-     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
-    ('docs.*.rds.CreateDBInstanceReadReplica.complete-section',
-     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
-
     # EC2 CopySnapshot documentation customizations
     ('docs.*.ec2.CopySnapshot.complete-section',
      AutoPopulatedParam('PresignedUrl').document_auto_populated_param),
@@ -981,6 +1066,71 @@ BUILTIN_HANDLERS = [
           'PutBucketLifecycle', 'PutBucketLogging', 'PutBucketNotification',
           'PutBucketPolicy', 'PutBucketReplication', 'PutBucketRequestPayment',
           'PutBucketTagging', 'PutBucketVersioning', 'PutBucketWebsite',
-          'PutObjectAcl']).hide_param)
+          'PutObjectAcl']).hide_param),
+
+    #############
+    # RDS
+    #############
+    ('creating-client-class.rds', add_generate_db_auth_token),
+
+    ('before-call.rds.CopyDBClusterSnapshot',
+     inject_presigned_url_rds),
+    ('before-call.rds.CreateDBCluster',
+     inject_presigned_url_rds),
+    ('before-call.rds.CopyDBSnapshot',
+     inject_presigned_url_rds),
+    ('before-call.rds.CreateDBInstanceReadReplica',
+     inject_presigned_url_rds),
+    ('before-call.rds.StartDBInstanceAutomatedBackupsReplication',
+     inject_presigned_url_rds),
+
+    # RDS PresignedUrl documentation customizations
+    ('docs.*.rds.CopyDBClusterSnapshot.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+    ('docs.*.rds.CreateDBCluster.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+    ('docs.*.rds.CopyDBSnapshot.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+    ('docs.*.rds.CreateDBInstanceReadReplica.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+    ('docs.*.rds.StartDBInstanceAutomatedBackupsReplication.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+
+    #############
+    # Neptune
+    #############
+    ('before-call.neptune.CopyDBClusterSnapshot',
+     inject_presigned_url_rds),
+    ('before-call.neptune.CreateDBCluster',
+     inject_presigned_url_rds),
+
+    # Neptune PresignedUrl documentation customizations
+    ('docs.*.neptune.CopyDBClusterSnapshot.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+    ('docs.*.neptune.CreateDBCluster.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+
+    #############
+    # DocDB
+    #############
+    ('before-call.docdb.CopyDBClusterSnapshot',
+     inject_presigned_url_rds),
+    ('before-call.docdb.CreateDBCluster',
+     inject_presigned_url_rds),
+
+    # DocDB PresignedUrl documentation customizations
+    ('docs.*.docdb.CopyDBClusterSnapshot.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+    ('docs.*.docdb.CreateDBCluster.complete-section',
+     AutoPopulatedParam('PreSignedUrl').document_auto_populated_param),
+
+    ###########
+    # SMS Voice
+     ##########
+    ('docs.title.sms-voice',
+     DeprecatedServiceDocumenter(
+         'pinpoint-sms-voice').inject_deprecation_notice),
+    ('before-call', inject_api_version_header_if_needed),
+
 ]
 _add_parameter_aliases(BUILTIN_HANDLERS)

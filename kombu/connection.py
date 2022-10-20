@@ -68,11 +68,6 @@ class Connection(object):
         SSL currently only works with the py-amqp, amqplib, and qpid
         transports.  For other transports you can use stunnel.
 
-    :keyword hostname: Default host name/address if not provided in the URL.
-    :keyword userid: Default user name if not provided in the URL.
-    :keyword password: Default password if not provided in the URL.
-    :keyword virtual_host: Default virtual host if not provided in the URL.
-    :keyword port: Default port if not provided in the URL.
     :keyword ssl: Use SSL to connect to the server. Default is ``False``.
       May not be supported by the specified transport.
     :keyword transport: Default transport if not specified in the URL.
@@ -97,6 +92,19 @@ class Connection(object):
         and always remember to close the connection::
 
             >>> conn.release()
+
+    *Legacy options*
+
+    These options have been replaced by the URL argument, but are still
+    supported for backwards compatibility:
+
+    :keyword hostname: Host name/address.
+        NOTE: You cannot specify both the URL argument and use the hostname
+        keyword argument at the same time.
+    :keyword userid: Default user name if not provided in the URL.
+    :keyword password: Default password if not provided in the URL.
+    :keyword virtual_host: Default virtual host if not provided in the URL.
+    :keyword port: Default port if not provided in the URL.
 
     """
     port = None
@@ -162,12 +170,12 @@ class Connection(object):
                 transport = self.uri_prefix = params['transport']
             else:
                 transport = transport or urlparse(hostname).scheme
-                if get_transport_cls(transport).can_parse_url:
-                    # set the transport so that the default is not used.
-                    params['transport'] = transport
-                else:
+                if not get_transport_cls(transport).can_parse_url:
                     # we must parse the URL
                     params.update(parse_url(hostname))
+
+                params['transport'] = transport
+
         self._init_params(**params)
 
         # fallback hosts
@@ -552,6 +560,7 @@ class Connection(object):
             ('login_method', self.login_method or D.get('login_method')),
             ('uri_prefix', self.uri_prefix),
             ('heartbeat', self.heartbeat),
+            ('failover_strategy', self.failover_strategy),
             ('alternates', self.alt),
         )
         return info
@@ -574,12 +583,13 @@ class Connection(object):
             if self.uri_prefix:
                 return '%s+%s' % (self.uri_prefix, hostname)
             return self.hostname
+        if self.uri_prefix:
+            return '%s+%s' % (self.uri_prefix, hostname)
         fields = self.info()
         port, userid, password, vhost, transport = getfields(fields)
-        scheme = ('{0}+{1}'.format(self.uri_prefix, transport)
-                  if self.uri_prefix else transport)
+
         return as_url(
-            scheme, hostname, port, userid, password, quote(vhost),
+            transport, hostname, port, userid, password, quote(vhost),
             sanitize=not include_password, mask=mask,
         )
 

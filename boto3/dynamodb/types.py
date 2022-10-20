@@ -10,9 +10,10 @@
 # distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF
 # ANY KIND, either express or implied. See the License for the specific
 # language governing permissions and limitations under the License.
-from collections import Mapping, Set
 from decimal import Decimal, Context, Clamped
 from decimal import Overflow, Inexact, Underflow, Rounded
+
+from boto3.compat import collections_abc
 
 from botocore.compat import six
 
@@ -62,6 +63,9 @@ class Binary(object):
         return 'Binary(%r)' % self.value
 
     def __str__(self):
+        return self.value
+
+    def __bytes__(self):
         return self.value
 
     def __hash__(self):
@@ -132,7 +136,7 @@ class TypeSerializer(object):
         elif self._is_map(value):
             dynamodb_type = MAP
 
-        elif self._is_list(value):
+        elif self._is_listlike(value):
             dynamodb_type = LIST
 
         else:
@@ -174,7 +178,7 @@ class TypeSerializer(object):
         return False
 
     def _is_set(self, value):
-        if isinstance(value, Set):
+        if isinstance(value, collections_abc.Set):
             return True
         return False
 
@@ -185,12 +189,12 @@ class TypeSerializer(object):
         return False
 
     def _is_map(self, value):
-        if isinstance(value, Mapping):
+        if isinstance(value, collections_abc.Mapping):
             return True
         return False
 
-    def _is_list(self, value):
-        if isinstance(value, list):
+    def _is_listlike(self, value):
+        if isinstance(value, (list, tuple)):
             return True
         return False
 

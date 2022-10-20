@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 # Natural Language Toolkit: Interface to the Stanford Chinese Segmenter
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: 52nlp <52nlpcn@gmail.com>
 #         Casper Lehmann-Strøm <casperlehmann@gmail.com>
 #
@@ -60,7 +60,7 @@ class StanfordSegmenter(TokenizerI):
                 verbose=verbose)
 
         # This is passed to java as the -cp option, the segmenter needs slf4j.
-        self._stanford_jar = os.pathsep.join(
+        self._stanford_jar = ':'.join(
             [_ for _ in [stanford_segmenter, slf4j] if not _ is None])
 
         self._sihan_corpora_dict = path_to_sihan_corpora_dict

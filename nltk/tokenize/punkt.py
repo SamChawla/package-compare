@@ -1,6 +1,6 @@
 # Natural Language Toolkit: Punkt sentence tokenizer
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Algorithm: Kiss & Strunk (2006)
 # Author: Willy <willy@csse.unimelb.edu.au> (original Python port)
 #         Steven Bird <stevenbird1@gmail.com> (additions)
@@ -1062,32 +1062,21 @@ class PunktTrainer(PunktBaseClass):
 
         p = count_b / N
         p1 = count_ab / count_a
-        try:
-            p2 = (count_b - count_ab) / (N - count_a)
-        except ZeroDivisionError as e:
-            p2 = 1
+        p2 = (count_b - count_ab) / (N - count_a)
 
-        print (p, p1, p2, N, count_a, count_b, count_ab)
+        summand1 = (count_ab * math.log(p) +
+                    (count_a - count_ab) * math.log(1.0 - p))
 
-        try:
-            summand1 = (count_ab * math.log(p) +
-                        (count_a - count_ab) * math.log(1.0 - p))
-        except ValueError as e:
-            summand1 = 0
+        summand2 = ((count_b - count_ab) * math.log(p) +
+                    (N - count_a - count_b + count_ab) * math.log(1.0 - p))
 
-        try:
-            summand2 = ((count_b - count_ab) * math.log(p) +
-                        (N - count_a - count_b + count_ab) * math.log(1.0 - p))
-        except ValueError as e:
-            summand2 = 0
-
-        if count_a == count_ab or p1 <= 0 or p1 >= 1:
+        if count_a == count_ab:
             summand3 = 0
         else:
             summand3 = (count_ab * math.log(p1) +
                         (count_a - count_ab) * math.log(1.0 - p1))
 
-        if count_b == count_ab or p2 <= 0 or p2 >= 1:
+        if count_b == count_ab:
             summand4 = 0
         else:
             summand4 = ((count_b - count_ab) * math.log(p2) +
@@ -1296,8 +1285,7 @@ class PunktSentenceTokenizer(PunktBaseClass,TokenizerI):
                 else:
                     # next sentence starts at following punctuation
                     last_break = match.end()
-        # The last sentence should not contain trailing whitespace.
-        yield slice(last_break, len(text.rstrip()))
+        yield slice(last_break, len(text))
 
     def _realign_boundaries(self, text, slices):
         """

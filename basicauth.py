@@ -2,7 +2,7 @@
 
 
 from base64 import b64decode, b64encode
-from six.moves.urllib.parse import quote, unquote
+from urllib import quote, unquote
 
 
 class DecodeError(Exception):
@@ -13,8 +13,7 @@ def encode(username, password):
     """Returns an HTTP basic authentication encrypted string given a valid
     username and password.
     """
-    username_password = '%s:%s' % (quote(username), quote(password))
-    return 'Basic ' + b64encode(username_password.encode()).decode()
+    return 'Basic ' + b64encode('%s:%s' % (quote(username), quote(password)))
 
 
 def decode(encoded_str):
@@ -28,7 +27,7 @@ def decode(encoded_str):
     # directly.
     if len(split) == 1:
         try:
-            username, password = b64decode(split[0]).decode().split(':', 1)
+            username, password = b64decode(split[0]).split(':', 1)
         except:
             raise DecodeError
 
@@ -38,7 +37,7 @@ def decode(encoded_str):
     elif len(split) == 2:
         if split[0].strip().lower() == 'basic':
             try:
-                username, password = b64decode(split[1]).decode().split(':', 1)
+                username, password = b64decode(split[1]).split(':', 1)
             except:
                 raise DecodeError
         else:

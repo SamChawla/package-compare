@@ -102,7 +102,7 @@ class CLexer(object):
     keywords = (
         '_BOOL', '_COMPLEX', 'AUTO', 'BREAK', 'CASE', 'CHAR', 'CONST',
         'CONTINUE', 'DEFAULT', 'DO', 'DOUBLE', 'ELSE', 'ENUM', 'EXTERN',
-        'FLOAT', 'FOR', 'GOTO', 'IF', 'INLINE', 'INT', 'LONG',
+        'FLOAT', 'FOR', 'GOTO', 'IF', 'INLINE', 'INT', 'LONG', 
         'REGISTER', 'OFFSETOF',
         'RESTRICT', 'RETURN', 'SHORT', 'SIGNED', 'SIZEOF', 'STATIC', 'STRUCT',
         'SWITCH', 'TYPEDEF', 'UNION', 'UNSIGNED', 'VOID',
@@ -171,9 +171,7 @@ class CLexer(object):
         'ELLIPSIS',
 
         # pre-processor
-        'PPHASH',       # '#'
-        'PPPRAGMA',     # 'pragma'
-        'PPPRAGMASTR',
+        'PPHASH',      # '#'
     )
 
     ##
@@ -221,7 +219,7 @@ class CLexer(object):
     string_char = r"""([^"\\\n]|"""+escape_sequence+')'
     string_literal = '"'+string_char+'*"'
     wstring_literal = 'L'+string_literal
-    bad_string_literal = '"'+string_char+'*?'+bad_escape+string_char+'*"'
+    bad_string_literal = '"'+string_char+'*'+bad_escape+string_char+'*"'
 
     # floating constants (K&R2: A.2.5.3)
     exponent_part = r"""([eE][-+]?[0-9]+)"""
@@ -276,6 +274,7 @@ class CLexer(object):
 
     def t_ppline_NEWLINE(self, t):
         r'\n'
+
         if self.pp_line is None:
             self._error('line number missing in #line', t)
         else:
@@ -305,14 +304,15 @@ class CLexer(object):
 
     def t_pppragma_PPPRAGMA(self, t):
         r'pragma'
-        return t
+        pass
 
-    t_pppragma_ignore = ' \t'
+    t_pppragma_ignore = ' \t<>.-{}();=+-*/$%@&^~!?:,0123456789'
 
-    def t_pppragma_STR(self, t):
-        '.+'
-        t.type = 'PPPRAGMASTR'
-        return t
+    @TOKEN(string_literal)
+    def t_pppragma_STR(self, t): pass
+
+    @TOKEN(identifier)
+    def t_pppragma_ID(self, t): pass
 
     def t_pppragma_error(self, t):
         self._error('invalid #pragma directive', t)

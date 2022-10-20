@@ -18,7 +18,6 @@ import warnings
 
 from datetime import datetime
 from types import FunctionType
-from threading import local
 
 if sys.version_info >= (3, 2):
     import contextlib
@@ -35,10 +34,10 @@ from raven.conf import defaults
 from raven.conf.remote import RemoteConfig
 from raven.exceptions import APIError, RateLimited
 from raven.utils import json, get_versions, get_auth_header, merge_dicts
-from raven.utils.compat import text_type, iteritems
+from raven._compat import text_type, iteritems
 from raven.utils.encoding import to_unicode
 from raven.utils.serializer import transform
-from raven.utils.stacks import get_stack_info, iter_stack_frames
+from raven.utils.stacks import get_stack_info, iter_stack_frames, slim_string
 from raven.utils.transaction import TransactionStack
 from raven.transport.registry import TransportRegistry, default_transports
 
@@ -151,8 +150,6 @@ class Client(object):
 
         o = options
 
-        self._local_state = local()
-
         self.raise_send_errors = raise_send_errors
 
         # configure loggers first
@@ -185,13 +182,15 @@ class Client(object):
 
         context = o.get('context')
         if context is None:
-            context = {'sys.argv': getattr(sys, 'argv', [])[:]}
+            context = {'sys.argv': sys.argv[:]}
         self.extra = context
         self.tags = o.get('tags') or {}
         self.environment = o.get('environment') or None
         self.release = o.get('release') or os.environ.get('HEROKU_SLUG_COMMIT')
-        self.repos = self._format_repos(o.get('repos'))
         self.transaction = TransactionStack()
+        # find the root transaction as the command which launched this
+        # process
+        self.transaction.push(slim_string(' '.join(sys.argv), 128))
 
         self.ignore_exceptions = set(o.get('ignore_exceptions') or ())
 
@@ -220,17 +219,6 @@ class Client(object):
             self.install_logging_hook()
 
         self.hook_libraries(hook_libraries)
-
-    def _format_repos(self, value):
-        if not value:
-            return {}
-        result = {}
-        for path, config in iteritems(value):
-            if path[0] != '/':
-                # assume its a module
-                path = os.path.abspath(__import__(path).__file__)
-            result[path] = config
-        return result
 
     def set_dsn(self, dsn=None, transport=None):
         if not dsn and os.environ.get('SENTRY_DSN'):
@@ -480,7 +468,6 @@ class Client(object):
         data.setdefault('event_id', event_id)
         data.setdefault('platform', PLATFORM_NAME)
         data.setdefault('sdk', SDK_VALUE)
-        data.setdefault('repos', self.repos)
 
         # insert breadcrumbs
         if self.enable_breadcrumbs:
@@ -625,8 +612,6 @@ class Client(object):
 
         self.send(**data)
 
-        self._local_state.last_event_id = data['event_id']
-
         return data['event_id']
 
     def is_enabled(self):
@@ -641,7 +626,7 @@ class Client(object):
             for frame in data['stacktrace']['frames']:
                 yield frame
         if 'exception' in data:
-            for frame in data['exception']['values'][-1]['stacktrace']['frames']:
+            for frame in data['exception']['values'][0]['stacktrace']['frames']:
                 yield frame
 
     def _successful_send(self):
@@ -673,9 +658,9 @@ class Client(object):
         """
         message = data.pop('message', '<no message value>')
         output = [message]
-        if 'exception' in data and 'stacktrace' in data['exception']['values'][-1]:
+        if 'exception' in data and 'stacktrace' in data['exception']['values'][0]:
             # try to reconstruct a reasonable version of the exception
-            for frame in data['exception']['values'][-1]['stacktrace']['frames']:
+            for frame in data['exception']['values'][0]['stacktrace']['frames']:
                 output.append('  File "%(fn)s", line %(lineno)s, in %(func)s' % {
                     'fn': frame.get('filename', 'unknown_filename'),
                     'lineno': frame.get('lineno', -1),
@@ -703,11 +688,11 @@ class Client(object):
 
         try:
             transport = self.remote.get_transport()
-            if transport.is_async:
-                transport.async_send(url, data, headers, self._successful_send,
+            if transport.async:
+                transport.async_send(data, headers, self._successful_send,
                                      failed_send)
             else:
-                transport.send(url, data, headers)
+                transport.send(data, headers)
                 self._successful_send()
         except Exception as e:
             if self.raise_send_errors:
@@ -885,14 +870,6 @@ class Client(object):
         self.context.breadcrumbs.record(*args, **kwargs)
 
     capture_breadcrumb = captureBreadcrumb
-
-    @property
-    def last_event_id(self):
-        return getattr(self._local_state, 'last_event_id', None)
-
-    @last_event_id.setter
-    def last_event_id(self, value):
-        self._local_state.last_event_id = value
 
 
 class DummyClient(Client):

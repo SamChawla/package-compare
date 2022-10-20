@@ -60,7 +60,9 @@ class AsyncWorker(object):
             timeout = self.options['shutdown_timeout']
 
             # wait briefly, initially
-            initial_timeout = min(0.1, timeout)
+            initial_timeout = 0.1
+            if timeout < initial_timeout:
+                initial_timeout = timeout
 
             if not self._timed_queue_join(initial_timeout):
                 # if that didn't work, wait a bit longer
@@ -167,14 +169,14 @@ class ThreadedHTTPTransport(AsyncTransport, HTTPTransport):
             self._worker = AsyncWorker()
         return self._worker
 
-    def send_sync(self, url, data, headers, success_cb, failure_cb):
+    def send_sync(self, data, headers, success_cb, failure_cb):
         try:
-            super(ThreadedHTTPTransport, self).send(url, data, headers)
+            super(ThreadedHTTPTransport, self).send(data, headers)
         except Exception as e:
             failure_cb(e)
         else:
             success_cb()
 
-    def async_send(self, url, data, headers, success_cb, failure_cb):
+    def async_send(self, data, headers, success_cb, failure_cb):
         self.get_worker().queue(
-            self.send_sync, url, data, headers, success_cb, failure_cb)
+            self.send_sync, data, headers, success_cb, failure_cb)

@@ -12,7 +12,7 @@ from django.conf import settings
 from django.http import HttpRequest
 from django.utils.functional import Promise
 from raven.utils.serializer import Serializer, register
-from raven.utils.compat import text_type
+from raven._compat import text_type
 
 __all__ = ('PromiseSerializer',)
 
@@ -45,7 +45,6 @@ class PromiseSerializer(Serializer):
             return self.recurse(text_type(value))
         return self.recurse(value, **kwargs)
 
-
 register(PromiseSerializer)
 
 
@@ -54,7 +53,6 @@ class HttpRequestSerializer(Serializer):
 
     def serialize(self, value, **kwargs):
         return '<%s at 0x%s>' % (type(value).__name__, id(value))
-
 
 register(HttpRequestSerializer)
 

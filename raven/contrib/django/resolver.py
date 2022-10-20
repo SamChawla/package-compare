@@ -56,8 +56,8 @@ class RouteResolver(object):
 
         if parents is None:
             parents = [resolver]
-        elif resolver not in parents:
-            parents = parents + [resolver]
+        else:
+            parents.append(resolver)
 
         new_path = path[match.end():]
         for pattern in resolver.url_patterns:

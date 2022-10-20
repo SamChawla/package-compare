@@ -1,6 +1,6 @@
 # Natural Language Toolkit: Agreement Metrics
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: Tom Lippincott <tom@cs.columbia.edu>
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
@@ -97,15 +97,8 @@ class AnnotationTask(object):
     """
 
     def __init__(self, data=None, distance=binary_distance):
-        """Initialize an annotation task.
-        
-        The data argument can be None (to create an empty annotation task) or a sequence of 3-tuples, 
-        each representing a coder's labeling of an item:
-            (coder,item,label)
-            
-        The distance argument is a function taking two arguments (labels) and producing a numerical distance.
-        The distance from a label to itself should be zero:
-            distance(l,l) = 0
+        """Initialize an empty annotation task.
+
         """
         self.distance = distance
         self.I = set()
@@ -121,9 +114,9 @@ class AnnotationTask(object):
                                 ",".join(x['labels'])), self.data))
 
     def load_array(self, array):
-        """Load an sequence of annotation results, appending to any data already loaded.
+        """Load the results of annotation.
 
-        The argument is a sequence of 3-tuples, each representing a coder's labeling of an item:
+        The argument is a list of 3-tuples, each representing a coder's labeling of an item:
             (coder,item,label)
         """
         for coder, item, labels in array:
@@ -311,15 +304,6 @@ class AnnotationTask(object):
         """Krippendorff 1980
 
         """
-        # check for degenerate cases
-        if len(self.K)==0:
-            raise ValueError("Cannot calculate alpha, no data present!")
-        if len(self.K) == 1:
-            log.debug("Only one annotation value, allpha returning 1.")
-            return 1
-        if len(self.C)==1 and len(self.I) == 1:
-            raise ValueError("Cannot calculate alpha, only one coder and item present!")
-        
         De = 0.0
 
         label_freqs = FreqDist(x['labels'] for x in self.data)
@@ -327,12 +311,9 @@ class AnnotationTask(object):
             nj = label_freqs[j]
             for l in self.K:
                 De += float(nj * label_freqs[l]) * self.distance(j, l)
-        try:
-            De = (1.0 / (len(self.I) * len(self.C) * (len(self.I) * len(self.C) - 1))) * De
-            log.debug("Expected disagreement: %f", De)
-            ret = 1.0 - (self.Do_alpha() / De)
-        except ZeroDivisionError:
-            raise ValueError("Cannot calculate alpha, expected disagreement zero, check the distance function!")
+        De = (1.0 / (len(self.I) * len(self.C) * (len(self.I) * len(self.C) - 1))) * De
+        log.debug("Expected disagreement: %f", De)
+        ret = 1.0 - (self.Do_alpha() / De)
         return ret
 
     def weighted_kappa_pairwise(self, cA, cB, max_distance=1.0):

@@ -6,7 +6,8 @@ This module implements WSGI related helpers adapted from ``werkzeug.wsgi``
 """
 from __future__ import absolute_import
 
-from raven.utils.compat import iteritems, urllib_quote
+from raven._compat import iteritems
+from raven.utils.compat import urllib_quote
 
 
 # `get_headers` comes from `werkzeug.datastructures.EnvironHeaders`

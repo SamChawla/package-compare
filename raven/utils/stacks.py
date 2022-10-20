@@ -13,7 +13,7 @@ import re
 import sys
 
 from raven.utils.serializer import transform
-from raven.utils.compat import iteritems
+from raven._compat import iteritems
 
 
 _coding_re = re.compile(r'coding[:=]\s*([-\w.]+)')
@@ -279,7 +279,7 @@ def get_stack_info(frames, transformer=transform, capture_locals=True,
             base_filename = sys.modules[module_name.split('.', 1)[0]].__file__
             filename = abs_path.split(
                 base_filename.rsplit('/', 2)[0], 1)[-1].lstrip("/")
-        except Exception:
+        except:
             filename = abs_path
 
         if not filename:

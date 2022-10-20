@@ -15,6 +15,7 @@ import time
 import functools
 import math
 import os
+import socket
 import stat
 import string
 import logging
@@ -22,8 +23,13 @@ import threading
 import io
 from collections import defaultdict
 
+from botocore.exceptions import IncompleteReadError
+from botocore.exceptions import ReadTimeoutError
+
+from s3transfer.compat import SOCKET_ERROR
 from s3transfer.compat import rename_file
 from s3transfer.compat import seekable
+from s3transfer.compat import fallocate
 
 
 MAX_PARTS = 10000
@@ -35,20 +41,29 @@ MIN_UPLOAD_CHUNKSIZE = 5 * (1024 ** 2)
 logger = logging.getLogger(__name__)
 
 
+S3_RETRYABLE_DOWNLOAD_ERRORS = (
+    socket.timeout, SOCKET_ERROR, ReadTimeoutError, IncompleteReadError
+)
+
+
 def random_file_extension(num_digits=8):
     return ''.join(random.choice(string.hexdigits) for _ in range(num_digits))
 
 
-def disable_upload_callbacks(request, operation_name, **kwargs):
+def signal_not_transferring(request, operation_name, **kwargs):
     if operation_name in ['PutObject', 'UploadPart'] and \
-            hasattr(request.body, 'disable_callback'):
-        request.body.disable_callback()
+            hasattr(request.body, 'signal_not_transferring'):
+        request.body.signal_not_transferring()
 
 
-def enable_upload_callbacks(request, operation_name, **kwargs):
+def signal_transferring(request, operation_name, **kwargs):
     if operation_name in ['PutObject', 'UploadPart'] and \
-            hasattr(request.body, 'enable_callback'):
-        request.body.enable_callback()
+            hasattr(request.body, 'signal_transferring'):
+        request.body.signal_transferring()
+
+
+def calculate_num_parts(size, part_size):
+    return int(math.ceil(size / float(part_size)))
 
 
 def calculate_range_parameter(part_size, part_index, num_parts,
@@ -124,6 +139,24 @@ def invoke_progress_callbacks(callbacks, bytes_transferred):
     if bytes_transferred:
         for callback in callbacks:
             callback(bytes_transferred=bytes_transferred)
+
+
+def get_filtered_dict(original_dict, whitelisted_keys):
+    """Gets a dictionary filtered by whitelisted keys
+
+    :param original_dict: The original dictionary of arguments to source keys
+        and values.
+    :param whitelisted_key: A list of keys to include in the filtered
+        dictionary.
+
+    :returns: A dictionary containing key/values from the original dictionary
+        whose key was included in the whitelist
+    """
+    filtered_dict = {}
+    for key, value in original_dict.items():
+        if key in whitelisted_keys:
+            filtered_dict[key] = value
+    return filtered_dict
 
 
 class CallArgs(object):
@@ -206,6 +239,8 @@ class CountCallbackInvoker(object):
 
 
 class OSUtils(object):
+    _MAX_FILENAME_LEN = 255
+
     def get_file_size(self, filename):
         return os.path.getsize(filename)
 
@@ -266,6 +301,21 @@ class OSUtils(object):
             return True
         return False
 
+    def get_temp_filename(self, filename):
+        suffix = os.extsep + random_file_extension()
+        path = os.path.dirname(filename)
+        name = os.path.basename(filename)
+        temp_filename = name[:self._MAX_FILENAME_LEN - len(suffix)] + suffix 
+        return os.path.join(path, temp_filename)
+
+    def allocate(self, filename, size):
+        try:
+            with self.open(filename, 'wb') as f:
+                fallocate(f, size)
+        except (OSError, IOError):
+            self.remove_file(filename)
+            raise
+
 
 class DeferredOpenFile(object):
     def __init__(self, filename, start_byte=0, mode='rb', open_function=open):
@@ -313,9 +363,9 @@ class DeferredOpenFile(object):
         self._open_if_needed()
         self._fileobj.write(data)
 
-    def seek(self, where):
+    def seek(self, where, whence=0):
         self._open_if_needed()
-        self._fileobj.seek(where)
+        self._fileobj.seek(where, whence)
 
     def tell(self):
         if self._fileobj is None:
@@ -375,6 +425,8 @@ class ReadFileChunk(object):
         self._size = self._calculate_file_size(
             self._fileobj, requested_size=chunk_size,
             start_byte=self._start_byte, actual_file_size=full_file_size)
+        # _amount_read represents the position in the chunk and may exceed
+        # the chunk size, but won't allow reads out of bounds.
         self._amount_read = 0
         self._callbacks = callbacks
         if callbacks is None:
@@ -423,15 +475,26 @@ class ReadFileChunk(object):
         return min(max_chunk_size, requested_size)
 
     def read(self, amount=None):
+        amount_left = max(self._size - self._amount_read, 0)
         if amount is None:
-            amount_to_read = self._size - self._amount_read
+            amount_to_read = amount_left
         else:
-            amount_to_read = min(self._size - self._amount_read, amount)
+            amount_to_read = min(amount_left, amount)
         data = self._fileobj.read(amount_to_read)
         self._amount_read += len(data)
         if self._callbacks is not None and self._callbacks_enabled:
             invoke_progress_callbacks(self._callbacks, len(data))
         return data
+
+    def signal_transferring(self):
+        self.enable_callback()
+        if hasattr(self._fileobj, 'signal_transferring'):
+            self._fileobj.signal_transferring()
+
+    def signal_not_transferring(self):
+        self.disable_callback()
+        if hasattr(self._fileobj, 'signal_not_transferring'):
+            self._fileobj.signal_not_transferring()
 
     def enable_callback(self):
         self._callbacks_enabled = True
@@ -439,13 +502,29 @@ class ReadFileChunk(object):
     def disable_callback(self):
         self._callbacks_enabled = False
 
-    def seek(self, where):
-        self._fileobj.seek(self._start_byte + where)
+    def seek(self, where, whence=0):
+        if whence not in (0, 1, 2):
+            # Mimic io's error for invalid whence values
+            raise ValueError(
+                "invalid whence (%s, should be 0, 1 or 2)" % whence)
+
+        # Recalculate where based on chunk attributes so seek from file
+        # start (whence=0) is always used
+        where += self._start_byte
+        if whence == 1:
+            where += self._amount_read
+        elif whence == 2:
+            where += self._size
+
+        self._fileobj.seek(max(where, self._start_byte))
         if self._callbacks is not None and self._callbacks_enabled:
             # To also rewind the callback() for an accurate progress report
+            bounded_where = max(min(where - self._start_byte, self._size), 0)
+            bounded_amount_read = min(self._amount_read, self._size)
+            amount = bounded_where - bounded_amount_read
             invoke_progress_callbacks(
-                self._callbacks, bytes_transferred=where - self._amount_read)
-        self._amount_read = where
+                self._callbacks, bytes_transferred=amount)
+        self._amount_read = max(where - self._start_byte, 0)
 
     def close(self):
         if self._close_callbacks is not None and self._callbacks_enabled:

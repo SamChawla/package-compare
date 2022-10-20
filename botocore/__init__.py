@@ -16,7 +16,7 @@ import os
 import re
 import logging
 
-__version__ = '1.5.43'
+__version__ = '1.20.112'
 
 
 class NullHandler(logging.Handler):
@@ -29,11 +29,10 @@ log.addHandler(NullHandler())
 
 
 _first_cap_regex = re.compile('(.)([A-Z][a-z]+)')
-_number_cap_regex = re.compile('([a-z])([0-9]+)')
 _end_cap_regex = re.compile('([a-z0-9])([A-Z])')
-# The regex below handles the special case where some acryonym
+# The regex below handles the special case where some acronym
 # name is pluralized, e.g GatewayARNs, ListWebACLs, SomeCNAMEs.
-_special_case_transform = re.compile('[A-Z]{3,}s$')
+_special_case_transform = re.compile('[A-Z]{2,}s$')
 # Prepopulate the cache with special cases that don't match
 # our regular transformation.
 _xform_cache = {
@@ -47,25 +46,35 @@ _xform_cache = {
     ('CreateStorediSCSIVolume', '-'): 'create-stored-iscsi-volume',
     ('ListHITsForQualificationType', '_'): 'list_hits_for_qualification_type',
     ('ListHITsForQualificationType', '-'): 'list-hits-for-qualification-type',
+    ('ExecutePartiQLStatement', '_'): 'execute_partiql_statement',
+    ('ExecutePartiQLStatement', '-'): 'execute-partiql-statement',
+    ('ExecutePartiQLTransaction', '_'): 'execute_partiql_transaction',
+    ('ExecutePartiQLTransaction', '-'): 'execute-partiql-transaction',
+    ('ExecutePartiQLBatch', '_'): 'execute_partiql_batch',
+    ('ExecutePartiQLBatch', '-'): 'execute-partiql-batch',
 }
 # The items in this dict represent partial renames to apply globally to all
 # services which might have a matching argument or operation. This way a
 # common mis-translation can be fixed without having to call out each
 # individual case.
-_partial_renames = {
-    'ipv-6': 'ipv6',
-    'ipv_6': 'ipv6',
-}
 ScalarTypes = ('string', 'integer', 'boolean', 'timestamp', 'float', 'double')
 
 BOTOCORE_ROOT = os.path.dirname(os.path.abspath(__file__))
 
+
 # Used to specify anonymous (unsigned) request signature
-UNSIGNED = object()
+class UNSIGNED(object):
+    def __copy__(self):
+        return self
+
+    def __deepcopy__(self, memodict):
+        return self
 
 
-def xform_name(name, sep='_', _xform_cache=_xform_cache,
-               partial_renames=_partial_renames):
+UNSIGNED = UNSIGNED()
+
+
+def xform_name(name, sep='_', _xform_cache=_xform_cache):
     """Convert camel case to a "pythonic" name.
 
     If the name contains the ``sep`` character, then it is
@@ -84,12 +93,6 @@ def xform_name(name, sep='_', _xform_cache=_xform_cache,
             # Replace something like ARNs, ACLs with _arns, _acls.
             name = name[:-len(matched)] + sep + matched.lower()
         s1 = _first_cap_regex.sub(r'\1' + sep + r'\2', name)
-        s2 = _number_cap_regex.sub(r'\1' + sep + r'\2', s1)
-        transformed = _end_cap_regex.sub(r'\1' + sep + r'\2', s2).lower()
-
-        # Do partial renames
-        for old, new in partial_renames.items():
-            if old in transformed:
-                transformed = transformed.replace(old, new)
+        transformed = _end_cap_regex.sub(r'\1' + sep + r'\2', s1).lower()
         _xform_cache[key] = transformed
     return _xform_cache[key]

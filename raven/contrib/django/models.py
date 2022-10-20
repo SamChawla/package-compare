@@ -19,8 +19,8 @@ from django.conf import settings
 from django.core.signals import got_request_exception, request_started
 from threading import Lock
 
+from raven._compat import PY2, binary_type, text_type
 from raven.utils.conf import convert_options
-from raven.utils.compat import PY2, binary_type, text_type
 from raven.utils.imports import import_string
 
 logger = logging.getLogger('sentry.errors.client')
@@ -106,6 +106,12 @@ class ProxyClient(object):
     __exit__ = lambda x, *a, **kw: x.__exit__(*a, **kw)
 
 client = ProxyClient()
+
+
+def get_option(x, d=None):
+    options = getattr(settings, 'RAVEN_CONFIG', {})
+
+    return getattr(settings, 'SENTRY_%s' % x, options.get(x, d))
 
 
 def get_client(client=None, reset=False):
@@ -224,17 +230,11 @@ def install_middleware():
     name = 'raven.contrib.django.middleware.SentryMiddleware'
     all_names = (name, 'raven.contrib.django.middleware.SentryLogMiddleware')
     with settings_lock:
-        # default settings.MIDDLEWARE is None
-        middleware_attr = 'MIDDLEWARE' if getattr(settings,
-                                                  'MIDDLEWARE',
-                                                  None) is not None \
-            else 'MIDDLEWARE_CLASSES'
-        # make sure to get an empty tuple when attr is None
-        middleware = getattr(settings, middleware_attr, ()) or ()
-        if set(all_names).isdisjoint(set(middleware)):
-            setattr(settings,
-                    middleware_attr,
-                    type(middleware)((name,)) + middleware)
+        middleware_list = set(settings.MIDDLEWARE_CLASSES)
+        if not any(n in middleware_list for n in all_names):
+            settings.MIDDLEWARE_CLASSES = (
+                name,
+            ) + tuple(settings.MIDDLEWARE_CLASSES)
 
 
 if (

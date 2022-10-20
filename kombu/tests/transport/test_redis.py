@@ -5,6 +5,7 @@ import types
 
 from anyjson import dumps, loads
 from collections import defaultdict
+from contextlib import contextmanager
 from itertools import count
 
 from kombu import Connection, Exchange, Queue, Consumer, Producer
@@ -14,8 +15,25 @@ from kombu.transport import virtual
 from kombu.utils import eventio  # patch poll
 
 from kombu.tests.case import (
-    Case, Mock, call, module_exists, skip_if_not_module, patch,
+    Case, ContextMock, Mock, call, module_exists, skip_if_not_module, patch,
 )
+
+
+class JSONEqual(object):
+    # The order in which a dict is serialized to json depends on the hashseed
+    # so we have this to support json in .assert_has_call*.
+
+    def __init__(self, expected):
+        self.expected = expected
+
+    def __eq__(self, other):
+        return loads(other) == loads(self.expected)
+
+    def __str__(self):
+        return self.expected
+
+    def __repr__(self):
+        return '(json)%r' % (self.expected,)
 
 
 class _poll(eventio._select):
@@ -33,7 +51,8 @@ class _poll(eventio._select):
 
 
 eventio.poll = _poll
-from kombu.transport import redis  # must import after poller patch
+# must import after poller patch
+from kombu.transport import redis  # noqa
 
 
 class ResponseError(Exception):
@@ -170,12 +189,21 @@ class Client(object):
 
         return self
 
+    def __repr__(self):
+        return '<MockClient: %r' % (id(self),)
+
 
 class Pipeline(object):
 
     def __init__(self, client):
         self.client = client
         self.stack = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        pass
 
     def __getattr__(self, key):
         if key not in self.__dict__:
@@ -194,12 +222,20 @@ class Pipeline(object):
 
 
 class Channel(redis.Channel):
+    Client = Client
 
-    def _get_client(self):
+    def _get_async_client(self):
         return Client
 
-    def _get_pool(self):
+    def _create_client(self, async=False):
+        return Client()
+
+    def _get_pool(self, async=False):
         return Mock()
+
+    @contextmanager
+    def conn_or_acquire(self, client=None):
+        yield client if client is not None else self._create_client()
 
     def _get_response_error(self):
         return ResponseError
@@ -273,8 +309,8 @@ class test_Channel(Case):
                 self._pool = pool_at_init[0]
                 super(XChannel, self).__init__(*args, **kwargs)
 
-            def _get_client(self):
-                return lambda *_, **__: client
+            def _create_client(self, async=False):
+                return client
 
         class XTransport(Transport):
             Channel = XChannel
@@ -295,9 +331,9 @@ class test_Channel(Case):
         self.channel._pool = None
         self.channel._after_fork()
 
-        self.channel._pool = Mock(name='pool')
+        pool = self.channel._pool = Mock(name='pool')
         self.channel._after_fork()
-        self.channel._pool.disconnect.assert_called_with()
+        pool.disconnect.assert_called_with()
 
     def test_next_delivery_tag(self):
         self.assertNotEqual(
@@ -317,6 +353,7 @@ class test_Channel(Case):
         client.rpush.assert_has_calls([
             call('george', spl1), call('elaine', spl1),
         ])
+        client.rpush.reset_mock()
 
         pl2 = {'body': 'BODY2', 'headers': {'x-funny': 1}}
         headers_after = dict(pl2['headers'], redelivered=True)
@@ -324,8 +361,10 @@ class test_Channel(Case):
         self.channel._do_restore_message(
             pl2, 'ex', 'rkey', client,
         )
+
         client.rpush.assert_has_calls([
-            call('george', spl2), call('elaine', spl2),
+            call('george', JSONEqual(spl2)),
+            call('elaine', JSONEqual(spl2)),
         ])
 
         client.rpush.side_effect = KeyError()
@@ -339,12 +378,13 @@ class test_Channel(Case):
         message = Mock(name='message')
         with patch('kombu.transport.redis.loads') as loads:
             loads.return_value = 'M', 'EX', 'RK'
-            client = self.channel.client = Mock(name='client')
+            client = self.channel._create_client = Mock(name='client')
+            client = client()
+            client.pipeline = ContextMock()
             restore = self.channel._do_restore_message = Mock(
                 name='_do_restore_message',
             )
-            pipe = Mock(name='pipe')
-            client.pipeline.return_value = pipe
+            pipe = client.pipeline.return_value
             pipe_hget = Mock(name='pipe.hget')
             pipe.hget.return_value = pipe_hget
             pipe_hget_hdel = Mock(name='pipe.hget.hdel')
@@ -368,7 +408,12 @@ class test_Channel(Case):
             restore.assert_called_with('M', 'EX', 'RK', client, False)
 
     def test_qos_restore_visible(self):
-        client = self.channel.client = Mock(name='client')
+        client = self.channel._create_client = Mock(name='client')
+        client = client()
+
+        def pipe(*args, **kwargs):
+            return Pipeline(client)
+        client.pipeline = pipe
         client.zrevrangebyscore.return_value = [
             (1, 10),
             (2, 20),
@@ -544,50 +589,54 @@ class test_Channel(Case):
 
     def test_put_fanout(self):
         self.channel._in_poll = False
-        c = self.channel.client = Mock()
+        c = self.channel._create_client = Mock()
 
         body = {'hello': 'world'}
         self.channel._put_fanout('exchange', body, '')
-        c.publish.assert_called_with('exchange', dumps(body))
+        c().publish.assert_called_with('exchange', JSONEqual(dumps(body)))
 
     def test_put_priority(self):
-        client = self.channel.client = Mock(name='client')
+        client = self.channel._create_client = Mock(name='client')
         msg1 = {'properties': {'delivery_info': {'priority': 3}}}
 
         self.channel._put('george', msg1)
-        client.lpush.assert_called_with(
-            self.channel._q_for_pri('george', 3), dumps(msg1),
+        client().lpush.assert_called_with(
+            self.channel._q_for_pri('george', 3), JSONEqual(dumps(msg1)),
         )
 
         msg2 = {'properties': {'delivery_info': {'priority': 313}}}
         self.channel._put('george', msg2)
-        client.lpush.assert_called_with(
-            self.channel._q_for_pri('george', 9), dumps(msg2),
+        client().lpush.assert_called_with(
+            self.channel._q_for_pri('george', 9), JSONEqual(dumps(msg2)),
         )
 
         msg3 = {'properties': {'delivery_info': {}}}
         self.channel._put('george', msg3)
-        client.lpush.assert_called_with(
-            self.channel._q_for_pri('george', 0), dumps(msg3),
+        client().lpush.assert_called_with(
+            self.channel._q_for_pri('george', 0), JSONEqual(dumps(msg3)),
         )
 
     def test_delete(self):
         x = self.channel
-        self.channel._in_poll = False
+        x._create_client = Mock()
+        x._create_client.return_value = x.client
         delete = x.client.delete = Mock()
         srem = x.client.srem = Mock()
 
         x._delete('queue', 'exchange', 'routing_key', None)
-        delete.assert_has_call('queue')
-        srem.assert_has_call(x.keyprefix_queue % ('exchange', ),
-                             x.sep.join(['routing_key', '', 'queue']))
+        delete.assert_any_call('queue')
+        srem.assert_called_once_with(
+            x.keyprefix_queue % ('exchange', ),
+            x.sep.join(['routing_key', '', 'queue'])
+        )
 
     def test_has_queue(self):
-        self.channel._in_poll = False
+        self.channel._create_client = Mock()
+        self.channel._create_client.return_value = self.channel.client
         exists = self.channel.client.exists = Mock()
         exists.return_value = True
         self.assertTrue(self.channel._has_queue('foo'))
-        exists.assert_has_call('foo')
+        exists.assert_any_call('foo')
 
         exists.return_value = False
         self.assertFalse(self.channel._has_queue('foo'))
@@ -648,16 +697,16 @@ class test_Channel(Case):
         self.channel._rotate_cycle('elaine')
 
     @skip_if_not_module('redis')
-    def test_get_client(self):
+    def test_get_async_client(self):
         import redis as R
-        KombuRedis = redis.Channel._get_client(self.channel)
+        KombuRedis = redis.Channel._get_async_client(self.channel)
         self.assertTrue(KombuRedis)
 
         Rv = getattr(R, 'VERSION', None)
         try:
             R.VERSION = (2, 4, 0)
             with self.assertRaises(VersionMismatch):
-                redis.Channel._get_client(self.channel)
+                redis.Channel._get_async_client(self.channel)
         finally:
             if Rv is not None:
                 R.VERSION = Rv
@@ -667,24 +716,6 @@ class test_Channel(Case):
         from redis.exceptions import ResponseError
         self.assertIs(redis.Channel._get_response_error(self.channel),
                       ResponseError)
-
-    def test_avail_client_when_not_in_poll(self):
-        self.channel._in_poll = False
-        c = self.channel.client = Mock()
-
-        with self.channel.conn_or_acquire() as client:
-            self.assertIs(client, c)
-
-    def test_avail_client_when_in_poll(self):
-        self.channel._in_poll = True
-        self.channel._pool = Mock()
-        cc = self.channel._create_client = Mock()
-        client = cc.return_value = Mock()
-
-        with self.channel.conn_or_acquire():
-            pass
-        self.channel.pool.release.assert_called_with(client.connection)
-        cc.assert_called_with()
 
     def test_register_with_event_loop(self):
         transport = self.connection.transport
@@ -894,7 +925,7 @@ class test_Redis(Case):
             channel._get('does-not-exist')
         channel.close()
 
-    def test_get_client(self):
+    def test_get_async_client(self):
 
         myredis, exceptions = _redis_modules()
 
@@ -1198,7 +1229,8 @@ class test_Mutex(Case):
             # Won
             uuid.return_value = lock_id
             client.setnx.return_value = True
-            pipe = client.pipeline.return_value = Mock(name='pipe')
+            client.pipeline = ContextMock()
+            pipe = client.pipeline.return_value
             pipe.get.return_value = lock_id
             held = False
             with redis.Mutex(client, 'foo1', 100):

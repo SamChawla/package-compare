@@ -527,7 +527,7 @@ class BaseCommand(object):
 
         if msg:
             if visible_issue_count:
-                self.stderr.write(msg)
+                self.stderr.write(msg, lambda x: x)
             else:
                 self.stdout.write(msg)
 

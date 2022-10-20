@@ -311,7 +311,7 @@ def register_json():
 
     def _loads(obj):
         if isinstance(obj, bytes_t):
-            obj = obj.decode()
+            obj = obj.decode('utf-8')
         return json_loads(obj)
 
     registry.register('json', json_dumps, _loads,
@@ -362,27 +362,33 @@ def register_pickle():
 
 def register_msgpack():
     """See http://msgpack.sourceforge.net/"""
+    pack = unpack = None
     try:
-        try:
-            from msgpack import packb as pack, unpackb
-            unpack = lambda s: unpackb(s, encoding='utf-8')
-        except ImportError:
-            # msgpack < 0.2.0 and Python 2.5
-            from msgpack import packs as pack, unpacks as unpack  # noqa
-        registry.register(
-            'msgpack', pack, unpack,
-            content_type='application/x-msgpack',
-            content_encoding='binary')
-    except (ImportError, ValueError):
+        import msgpack
+        if msgpack.version >= (0, 4):
+            from msgpack import packb, unpackb
 
+            def pack(s):
+                return packb(s, use_bin_type=True)
+
+            def unpack(s):
+                return unpackb(s, encoding='utf-8')
+        else:
+            def version_mismatch(*args, **kwargs):
+                raise SerializerNotInstalled(
+                    'msgpack requires msgpack-python >= 0.4.0')
+            pack = unpack = version_mismatch
+    except (ImportError, ValueError):
         def not_available(*args, **kwargs):
-            """In case a client receives a msgpack message, but yaml
-            isn't installed."""
             raise SerializerNotInstalled(
                 'No decoder installed for msgpack. '
-                'Please install the msgpack library')
-        registry.register('msgpack', None, not_available,
-                          'application/x-msgpack')
+                'Please install the msgpack-python library')
+        pack = unpack = not_available
+    registry.register(
+        'msgpack', pack, unpack,
+        content_type='application/x-msgpack',
+        content_encoding='binary',
+    )
 
 # Register the base serialization methods.
 register_json()

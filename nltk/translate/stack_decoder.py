@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Natural Language Toolkit: Stack decoder
 #
-# Copyright (C) 2001-2017 NLTK Project
+# Copyright (C) 2001-2016 NLTK Project
 # Author: Tah Wei Hoon <hoon.tw@gmail.com>
 # URL: <http://nltk.org/>
 # For license information, see LICENSE.TXT
@@ -493,7 +493,3 @@ class _Stack(object):
 
     def __contains__(self, hypothesis):
         return hypothesis in self.items
-
-    def __bool__(self):
-        return len(self.items) != 0
-    __nonzero__=__bool__

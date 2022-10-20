@@ -2,8 +2,7 @@
 # DEPRECATED: implementation for ffi.verify()
 #
 import sys, imp
-from . import model
-from .error import VerificationError
+from . import model, ffiplatform
 
 
 class VCPythonEngine(object):
@@ -156,7 +155,7 @@ class VCPythonEngine(object):
                                           self.verifier.modulefilename)
             except ImportError as e:
                 error = "importing %r: %s" % (self.verifier.modulefilename, e)
-                raise VerificationError(error)
+                raise ffiplatform.VerificationError(error)
             finally:
                 if hasattr(sys, "setdlopenflags"):
                     sys.setdlopenflags(previous_flags)
@@ -186,7 +185,7 @@ class VCPythonEngine(object):
             def __dir__(self):
                 return FFILibrary._cffi_dir + list(self.__dict__)
         library = FFILibrary()
-        if module._cffi_setup(lst, VerificationError, library):
+        if module._cffi_setup(lst, ffiplatform.VerificationError, library):
             import warnings
             warnings.warn("reimporting %r might overwrite older definitions"
                           % (self.verifier.get_module_name()))
@@ -213,7 +212,7 @@ class VCPythonEngine(object):
                 method = getattr(self, '_generate_cpy_%s_%s' % (kind,
                                                                 step_name))
             except AttributeError:
-                raise VerificationError(
+                raise ffiplatform.VerificationError(
                     "not implemented in verify(): %r" % name)
             try:
                 method(tp, realname)
@@ -309,7 +308,7 @@ class VCPythonEngine(object):
         elif isinstance(tp, model.ArrayType):
             return '_cffi_from_c_pointer((char *)%s, _cffi_type(%d))' % (
                 var, self._gettypenum(model.PointerType(tp.item)))
-        elif isinstance(tp, model.StructOrUnion):
+        elif isinstance(tp, model.StructType):
             if tp.fldnames is None:
                 raise TypeError("'%s' is used as %s, but is opaque" % (
                     tp._get_c_name(), context))
@@ -486,7 +485,7 @@ class VCPythonEngine(object):
                     prnt('  { %s = &p->%s; (void)tmp; }' % (
                         ftype.get_c_name('*tmp', 'field %r'%fname, quals=fqual),
                         fname))
-                except VerificationError as e:
+                except ffiplatform.VerificationError as e:
                     prnt('  /* %s */' % str(e))   # cannot verify it, ignore
         prnt('}')
         prnt('static PyObject *')
@@ -551,7 +550,7 @@ class VCPythonEngine(object):
             # check that the layout sizes and offsets match the real ones
             def check(realvalue, expectedvalue, msg):
                 if realvalue != expectedvalue:
-                    raise VerificationError(
+                    raise ffiplatform.VerificationError(
                         "%s (we have %d, but C compiler says %d)"
                         % (msg, expectedvalue, realvalue))
             ffi = self.ffi
@@ -772,7 +771,7 @@ class VCPythonEngine(object):
                 BItemType = self.ffi._get_cached_btype(tp.item)
                 length, rest = divmod(size, self.ffi.sizeof(BItemType))
                 if rest != 0:
-                    raise VerificationError(
+                    raise ffiplatform.VerificationError(
                         "bad size: %r does not seem to be an array of %s" %
                         (name, tp.item))
                 tp = tp.resolve_length(length)
